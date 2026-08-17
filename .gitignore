@@ -1,0 +1,14 @@
+/bin/
+*.test
+coverage.out
+.idea/
+.vscode/
+*.swp
+.env
+.kube/
+*.exe
+
+# Local lab notes only — contain host-specific details. Never commit.
+*HANDOFF*.md
+START-HERE.txt
+NOTES-LOCAL*.md

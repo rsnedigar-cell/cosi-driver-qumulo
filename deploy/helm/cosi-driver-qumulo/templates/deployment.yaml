@@ -1,0 +1,150 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cosi-driver-qumulo.fullname" . }}
+  labels:
+    {{- include "cosi-driver-qumulo.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "cosi-driver-qumulo.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "cosi-driver-qumulo.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "cosi-driver-qumulo.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      securityContext:
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: objectstorage-provisioner-sidecar
+          image: {{ .Values.sidecar.image }}
+          args:
+            - --v=4
+            - --driver-addr=unix:///var/lib/cosi/cosi.sock
+          resources:
+            {{- toYaml .Values.sidecar.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+          volumeMounts:
+            - name: socket
+              mountPath: /var/lib/cosi
+            - name: kube-api-access
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
+        - name: qumulo-cosi-driver
+          image: {{ include "cosi-driver-qumulo.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --driver-address=unix:///var/lib/cosi/cosi.sock
+            - --driver-name={{ .Values.driverName }}
+            {{- if .Values.metrics.enabled }}
+            - {{ printf "--metrics-address=:%v" .Values.metrics.port | quote }}
+            {{- else }}
+            - --metrics-address=
+            {{- end }}
+            - --secret-namespace={{ .Release.Namespace }}
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: QUMULO_ENDPOINT
+              value: {{ .Values.qumulo.endpoint | quote }}
+            - name: QUMULO_REST_PORT
+              value: {{ .Values.qumulo.restPort | quote }}
+            - name: QUMULO_S3_PORT
+              value: {{ .Values.qumulo.s3Port | quote }}
+            - name: QUMULO_REGION
+              value: {{ .Values.qumulo.region | quote }}
+            - name: QUMULO_BASE_PATH
+              value: {{ .Values.qumulo.basePath | quote }}
+            - name: QUMULO_VERSION_FLOOR
+              value: {{ .Values.qumulo.versionFloor | quote }}
+          {{- if .Values.metrics.enabled }}
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: socket
+              mountPath: /var/lib/cosi
+            - name: credentials
+              mountPath: /etc/qumulo/credentials
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+      volumes:
+        - name: socket
+          emptyDir: {}
+        - name: credentials
+          secret:
+            secretName: {{ .Values.qumulo.existingSecret }}
+            defaultMode: 0440
+        - name: kube-api-access
+          projected:
+            defaultMode: 0444
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 3600
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+              - downwardAPI:
+                  items:
+                    - path: namespace
+                      fieldRef:
+                        apiVersion: v1
+                        fieldPath: metadata.namespace
+      terminationGracePeriodSeconds: 30
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

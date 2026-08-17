@@ -1,0 +1,12 @@
+apiVersion: storage.k8s.io/v1
+kind: CSIDriver
+metadata:
+  name: file.qumulo.com
+spec:
+  attachRequired: false
+  podInfoOnMount: false
+  fsGroupPolicy: None
+  requiresRepublish: false
+  storageCapacity: false
+  volumeLifecycleModes:
+    - Persistent

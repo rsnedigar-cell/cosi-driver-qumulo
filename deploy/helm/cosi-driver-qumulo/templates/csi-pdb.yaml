@@ -1,0 +1,15 @@
+{{- if and .Values.csi.enabled (gt (int .Values.csi.controller.replicaCount) 1) }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "cosi-driver-qumulo.csiControllerName" . }}
+  labels:
+    {{- include "cosi-driver-qumulo.labels" . | nindent 4 }}
+    app.kubernetes.io/component: csi-controller
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "cosi-driver-qumulo.csiSelectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: csi-controller
+{{- end }}

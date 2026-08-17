@@ -1,0 +1,128 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qumulo-cosi-driver
+  namespace: qumulo-cosi
+  labels:
+    app.kubernetes.io/name: cosi-driver-qumulo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cosi-driver-qumulo
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cosi-driver-qumulo
+    spec:
+      serviceAccountName: qumulo-cosi-driver
+      automountServiceAccountToken: false
+      securityContext:
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: objectstorage-provisioner-sidecar
+          image: registry.k8s.io/sig-storage/objectstorage-sidecar:v0.2.2@sha256:c7166a73a303c43c8c1dca3e81aacf2fa85e98b46bcab0b64249cde19fa67979
+          args:
+            - "--v=4"
+            - "--driver-addr=unix:///var/lib/cosi/cosi.sock"
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+          volumeMounts:
+            - name: socket
+              mountPath: /var/lib/cosi
+            - name: kube-api-access
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
+        - name: qumulo-cosi-driver
+          image: ghcr.io/rsnedigar-cell/cosi-driver-qumulo:0.2.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--driver-address=unix:///var/lib/cosi/cosi.sock"
+            - "--driver-name=s3.qumulo.com"
+            - "--metrics-address=:8081"
+            - "--secret-namespace=qumulo-cosi"
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: QUMULO_ENDPOINT
+              value: "qumulo.example.internal"
+            - name: QUMULO_REST_PORT
+              value: "8000"
+          ports:
+            - name: metrics
+              containerPort: 8081
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          volumeMounts:
+            - name: socket
+              mountPath: /var/lib/cosi
+            - name: credentials
+              mountPath: /etc/qumulo/credentials
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+      volumes:
+        - name: socket
+          emptyDir: {}
+        - name: credentials
+          secret:
+            secretName: qumulo-cosi-creds
+            defaultMode: 0440
+        - name: kube-api-access
+          projected:
+            defaultMode: 0444
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 3600
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+              - downwardAPI:
+                  items:
+                    - path: namespace
+                      fieldRef:
+                        apiVersion: v1
+                        fieldPath: metadata.namespace
+      terminationGracePeriodSeconds: 30

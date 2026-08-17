@@ -1,0 +1,11 @@
+cosi-driver-qumulo
+Copyright 2026 The cosi-driver-qumulo Authors
+
+This project is independent software. It is not a product of Qumulo, Inc.,
+and is not affiliated with or endorsed by Qumulo, Inc. Qumulo is a trademark
+of its respective owner.
+
+This product includes the Container Object Storage Interface protobuf
+definitions from the Kubernetes COSI project
+(https://github.com/kubernetes-sigs/container-object-storage-interface),
+licensed under the Apache License, Version 2.0.

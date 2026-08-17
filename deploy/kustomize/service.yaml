@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: qumulo-cosi-driver
+  namespace: qumulo-cosi
+  labels:
+    app.kubernetes.io/name: cosi-driver-qumulo
+spec:
+  selector:
+    app.kubernetes.io/name: cosi-driver-qumulo
+  ports:
+    - name: metrics
+      port: 8081
+      targetPort: metrics

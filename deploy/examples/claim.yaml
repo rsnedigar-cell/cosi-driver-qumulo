@@ -1,0 +1,21 @@
+# kubectl create namespace app
+apiVersion: objectstorage.k8s.io/v1alpha1
+kind: BucketClaim
+metadata:
+  name: photos
+  namespace: app
+spec:
+  bucketClassName: qumulo-gold
+  protocols:
+    - s3
+---
+apiVersion: objectstorage.k8s.io/v1alpha1
+kind: BucketAccess
+metadata:
+  name: photos-access
+  namespace: app
+spec:
+  bucketClaimName: photos
+  bucketAccessClassName: qumulo-rw
+  credentialsSecretName: photos-s3-creds
+  protocol: s3

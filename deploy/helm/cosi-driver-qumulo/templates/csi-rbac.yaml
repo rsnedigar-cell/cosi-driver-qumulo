@@ -1,0 +1,98 @@
+{{- if .Values.csi.enabled }}
+{{- if .Values.csi.serviceAccount.create }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "cosi-driver-qumulo.csiControllerServiceAccountName" . }}
+  labels:
+    {{- include "cosi-driver-qumulo.labels" . | nindent 4 }}
+  {{- with .Values.csi.serviceAccount.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "cosi-driver-qumulo.csiNodeServiceAccountName" . }}
+  labels:
+    {{- include "cosi-driver-qumulo.labels" . | nindent 4 }}
+  {{- with .Values.csi.serviceAccount.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+automountServiceAccountToken: false
+{{- end }}
+{{- if .Values.csi.rbac.create }}
+{{- if .Values.csi.serviceAccount.create }}
+---
+{{- end }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "cosi-driver-qumulo.csiProvisionerName" . }}
+  labels:
+    {{- include "cosi-driver-qumulo.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims/status"]
+    verbs: ["patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["list", "watch", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "cosi-driver-qumulo.csiProvisionerName" . }}
+  labels:
+    {{- include "cosi-driver-qumulo.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "cosi-driver-qumulo.csiProvisionerName" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "cosi-driver-qumulo.csiControllerServiceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "cosi-driver-qumulo.csiLeaderElectionName" . }}
+  labels:
+    {{- include "cosi-driver-qumulo.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "cosi-driver-qumulo.csiLeaderElectionName" . }}
+  labels:
+    {{- include "cosi-driver-qumulo.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "cosi-driver-qumulo.csiLeaderElectionName" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "cosi-driver-qumulo.csiControllerServiceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
+{{- end }}

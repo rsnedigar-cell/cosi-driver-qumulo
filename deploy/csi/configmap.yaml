@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: qumulo-csi-config
+  namespace: qumulo-cosi
+data:
+  # Replace these example values before applying this directory.
+  QUMULO_ENDPOINT: qumulo.example.com
+  QUMULO_DATA_SERVER: qumulo.example.com
+  QUMULO_REST_PORT: "8000"
+  QUMULO_VERSION_FLOOR: "7.2.0"
+  QUMULO_CSI_BASE_PATH: /k8s-volumes
+  QUMULO_CSI_ALLOWED_NETWORKS: 10.0.0.0/8
+  QUMULO_CSI_DRIVER_NAME: file.qumulo.com
+  QUMULO_INSECURE_SKIP_TLS_VERIFY: "false"

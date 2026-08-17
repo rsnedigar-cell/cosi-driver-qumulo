@@ -1,0 +1,13 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: qumulo-cosi
+resources:
+  - namespace.yaml
+  - rbac.yaml
+  - deployment.yaml
+  - service.yaml
+  # Create Secret qumulo-cosi-creds before applying. See docs/install.md
+  # and the template in secret.yaml.
+images:
+  - name: ghcr.io/rsnedigar-cell/cosi-driver-qumulo
+    newTag: "0.2.0"

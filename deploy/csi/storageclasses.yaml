@@ -1,0 +1,44 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: qumulo-nfs
+provisioner: file.qumulo.com
+reclaimPolicy: Delete
+allowVolumeExpansion: true
+volumeBindingMode: Immediate
+parameters:
+  protocol: nfs
+  basePath: /k8s-volumes
+  allowedNetworks: 10.0.0.0/8
+  directoryMode: "0777"
+  quotaEnabled: "true"
+  deleteData: "true"
+  nfsVersion: "4.1"
+  nfsExportPrefix: /k8s
+  nfsRequirePrivilegedPort: "false"
+  nfsRootSquash: "true"
+  nfsAnonymousUID: "65534"
+  nfsAnonymousGID: "65534"
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: qumulo-smb
+provisioner: file.qumulo.com
+reclaimPolicy: Delete
+allowVolumeExpansion: true
+volumeBindingMode: Immediate
+parameters:
+  protocol: smb
+  basePath: /k8s-volumes
+  allowedNetworks: 10.0.0.0/8
+  directoryMode: "0777"
+  quotaEnabled: "true"
+  deleteData: "true"
+  smbRequireEncryption: "true"
+  smbAccessBasedEnumeration: "true"
+  allowAllSMBUsers: "false"
+  smbTrusteeDomain: LOCAL
+  smbTrusteeName: k8s-smb
+  csi.storage.k8s.io/node-publish-secret-name: qumulo-smb-credentials
+  csi.storage.k8s.io/node-publish-secret-namespace: qumulo-cosi

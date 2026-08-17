@@ -1,0 +1,60 @@
+# Supported smoke test. Consumes the COSI-generated Secret.
+# Qumulo S3 is path-style + SigV4. Recent AWS SDKs must not send
+# default trailer checksums (see request_checksum_calculation).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: photos-put-get
+  namespace: app
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: probe
+          image: python:3.12-slim
+          env:
+            - name: AWS_EC2_METADATA_DISABLED
+              value: "true"
+          command: ["python", "-c"]
+          args:
+            - |
+              import json, subprocess, sys
+              subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "boto3"])
+              import boto3
+              import urllib3
+              from botocore.config import Config
+              urllib3.disable_warnings()
+              info = json.load(open("/cosi/BucketInfo"))
+              spec = info["spec"]
+              s3s = spec["secretS3"]
+              client = boto3.client(
+                  "s3",
+                  endpoint_url=s3s["endpoint"],
+                  aws_access_key_id=s3s["accessKeyID"],
+                  aws_secret_access_key=s3s["accessSecretKey"],
+                  region_name=s3s.get("region") or "us-east-1",
+                  verify=False,
+                  config=Config(
+                      s3={"addressing_style": "path"},
+                      signature_version="s3v4",
+                      request_checksum_calculation="when_required",
+                      response_checksum_validation="when_required",
+                  ),
+              )
+              bucket = spec["bucketName"]
+              body = b"hello from cosi job\n"
+              client.put_object(Bucket=bucket, Key="hello.txt", Body=body)
+              got = client.get_object(Bucket=bucket, Key="hello.txt")["Body"].read()
+              print("PUT/GET ok", got == body)
+              if got != body:
+                  raise SystemExit(2)
+          volumeMounts:
+            - name: cosi
+              mountPath: /cosi
+              readOnly: true
+      volumes:
+        - name: cosi
+          secret:
+            secretName: photos-s3-creds

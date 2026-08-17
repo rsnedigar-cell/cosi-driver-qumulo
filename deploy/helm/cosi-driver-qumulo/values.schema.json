@@ -1,0 +1,216 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["replicaCount", "image", "sidecar", "driverName", "metrics", "qumulo", "serviceAccount", "rbac", "csi"],
+  "properties": {
+    "replicaCount": { "type": "integer", "minimum": 1 },
+    "image": {
+      "type": "object",
+      "required": ["repository", "tag", "digest", "pullPolicy"],
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "tag": { "type": "string", "minLength": 1 },
+        "digest": { "type": "string", "pattern": "^$|^sha256:[a-f0-9]{64}$" },
+        "pullPolicy": { "enum": ["Always", "IfNotPresent", "Never"] }
+      }
+    },
+    "sidecar": {
+      "type": "object",
+      "required": ["image", "resources"],
+      "properties": {
+        "image": { "type": "string", "minLength": 1 },
+        "resources": { "type": "object" }
+      }
+    },
+    "driverName": { "type": "string", "minLength": 1 },
+    "metrics": {
+      "type": "object",
+      "required": ["enabled", "port", "service"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "service": {
+          "type": "object",
+          "required": ["enabled", "type", "annotations"],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "type": { "enum": ["ClusterIP", "NodePort", "LoadBalancer"] },
+            "annotations": { "type": "object" }
+          }
+        }
+      }
+    },
+    "qumulo": {
+      "type": "object",
+      "required": ["endpoint", "restPort", "s3Port", "region", "basePath", "versionFloor", "existingSecret"],
+      "properties": {
+        "endpoint": { "type": "string", "minLength": 1 },
+        "restPort": { "type": "string", "pattern": "^[0-9]+$" },
+        "s3Port": { "type": "string", "pattern": "^[0-9]+$" },
+        "region": { "type": "string", "minLength": 1 },
+        "basePath": { "type": "string", "pattern": "^/" },
+        "versionFloor": { "type": "string", "minLength": 1 },
+        "existingSecret": { "type": "string", "minLength": 1 }
+      }
+    },
+    "serviceAccount": {
+      "type": "object",
+      "required": ["create", "name", "annotations"],
+      "properties": {
+        "create": { "type": "boolean" },
+        "name": { "type": "string" },
+        "annotations": { "type": "object" }
+      }
+    },
+    "rbac": {
+      "type": "object",
+      "required": ["create"],
+      "properties": { "create": { "type": "boolean" } }
+    },
+    "csi": {
+      "type": "object",
+      "required": ["enabled", "driverName", "dataServer", "basePath", "allowedNetworks", "existingSecret", "handleKeySecret", "caFile", "insecureSkipTLSVerify", "rbac", "serviceAccount", "controller", "node", "storageClasses"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "image": { "type": "string" },
+        "imageDigest": { "type": "string", "pattern": "^$|^sha256:[a-f0-9]{64}$" },
+        "driverName": { "type": "string", "minLength": 1, "maxLength": 63 },
+        "dataServer": { "type": "string" },
+        "basePath": { "type": "string", "pattern": "^/[^/].*" },
+        "allowedNetworks": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 255, "pattern": "^[^\\s,;]+$" }
+        },
+        "existingSecret": { "type": "string" },
+        "handleKeySecret": { "type": "string", "minLength": 1 },
+        "caFile": { "type": "string" },
+        "insecureSkipTLSVerify": { "type": "boolean" },
+        "rbac": {
+          "type": "object",
+          "required": ["create"],
+          "properties": { "create": { "type": "boolean" } }
+        },
+        "serviceAccount": {
+          "type": "object",
+          "required": ["create", "controllerName", "nodeName", "annotations"],
+          "properties": {
+            "create": { "type": "boolean" },
+            "controllerName": { "type": "string" },
+            "nodeName": { "type": "string" },
+            "annotations": { "type": "object" }
+          }
+        },
+        "controller": {
+          "type": "object",
+          "required": ["replicaCount", "provisionerImage", "resizerImage", "livenessImage", "resources", "sidecarResources"],
+          "properties": {
+            "replicaCount": { "type": "integer", "minimum": 1 },
+            "provisionerImage": { "type": "string", "minLength": 1 },
+            "resizerImage": { "type": "string", "minLength": 1 },
+            "livenessImage": { "type": "string", "minLength": 1 },
+            "resources": { "type": "object" },
+            "sidecarResources": { "type": "object" }
+          }
+        },
+        "node": {
+          "type": "object",
+          "required": ["registrarImage", "livenessImage", "kubeletPath", "resources", "sidecarResources", "nodeSelector", "tolerations"],
+          "properties": {
+            "registrarImage": { "type": "string", "minLength": 1 },
+            "livenessImage": { "type": "string", "minLength": 1 },
+            "kubeletPath": { "type": "string", "pattern": "^/[^/].*" },
+            "resources": { "type": "object" },
+            "sidecarResources": { "type": "object" },
+            "nodeSelector": { "type": "object" },
+            "tolerations": { "type": "array" }
+          }
+        },
+        "storageClasses": {
+          "type": "object",
+          "required": ["nfs", "smb"],
+          "properties": {
+            "nfs": {
+              "type": "object",
+              "required": ["create", "name", "reclaimPolicy", "directoryMode", "quotaEnabled", "deleteData", "nfsVersion", "exportPrefix", "requirePrivilegedPort", "rootSquash", "anonymousUID", "anonymousGID"],
+              "properties": {
+                "create": { "type": "boolean" },
+                "name": { "type": "string", "minLength": 1 },
+                "reclaimPolicy": { "enum": ["Delete", "Retain"] },
+                "directoryMode": { "type": "string", "pattern": "^0[0-7]{3}$" },
+                "quotaEnabled": { "type": "boolean" },
+                "deleteData": { "type": "boolean" },
+                "nfsVersion": { "enum": ["3", "4.1"] },
+                "exportPrefix": { "type": "string", "pattern": "^/" },
+                "requirePrivilegedPort": { "type": "boolean" },
+                "rootSquash": { "type": "boolean" },
+                "anonymousUID": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+                "anonymousGID": { "type": "integer", "minimum": 0, "maximum": 4294967295 }
+              }
+            },
+            "smb": {
+              "type": "object",
+              "required": ["create", "name", "reclaimPolicy", "directoryMode", "quotaEnabled", "deleteData", "requireEncryption", "accessBasedEnumeration", "smbTrusteeAuthID", "smbTrusteeDomain", "smbTrusteeName", "allowAllSMBUsers", "credentialsSecret"],
+              "properties": {
+                "create": { "type": "boolean" },
+                "name": { "type": "string", "minLength": 1 },
+                "reclaimPolicy": { "enum": ["Delete", "Retain"] },
+                "directoryMode": { "type": "string", "pattern": "^0[0-7]{3}$" },
+                "quotaEnabled": { "type": "boolean" },
+                "deleteData": { "type": "boolean" },
+                "requireEncryption": { "type": "boolean" },
+                "accessBasedEnumeration": { "type": "boolean" },
+                "smbTrusteeAuthID": { "type": "string", "pattern": "^$|.*\\S.*" },
+                "smbTrusteeDomain": { "type": "string", "pattern": "^$|.*\\S.*" },
+                "smbTrusteeName": { "type": "string", "pattern": "^$|.*\\S.*" },
+                "allowAllSMBUsers": { "type": "boolean" },
+                "credentialsSecret": { "type": "string" }
+              },
+              "allOf": [
+                {
+                  "if": {
+                    "properties": {
+                      "create": { "const": true },
+                      "allowAllSMBUsers": { "const": false }
+                    }
+                  },
+                  "then": {
+                    "anyOf": [
+                      {
+                        "properties": { "smbTrusteeAuthID": { "minLength": 1 } }
+                      },
+                      {
+                        "properties": {
+                          "smbTrusteeDomain": { "minLength": 1 },
+                          "smbTrusteeName": { "minLength": 1 }
+                        }
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": ["csi"],
+        "properties": {
+          "csi": {
+            "required": ["enabled"],
+            "properties": { "enabled": { "const": true } }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "csi": { "properties": { "allowedNetworks": { "minItems": 1 } } }
+        }
+      }
+    }
+  ]
+}

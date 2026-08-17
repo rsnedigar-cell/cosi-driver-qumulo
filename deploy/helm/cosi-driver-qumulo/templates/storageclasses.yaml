@@ -1,0 +1,61 @@
+{{- if .Values.csi.enabled }}
+{{- if .Values.csi.storageClasses.nfs.create }}
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: {{ .Values.csi.storageClasses.nfs.name }}
+  labels:
+    {{- include "cosi-driver-qumulo.labels" . | nindent 4 }}
+provisioner: {{ .Values.csi.driverName }}
+reclaimPolicy: {{ .Values.csi.storageClasses.nfs.reclaimPolicy }}
+allowVolumeExpansion: true
+volumeBindingMode: Immediate
+parameters:
+  protocol: nfs
+  basePath: {{ .Values.csi.basePath | quote }}
+  allowedNetworks: {{ join "," .Values.csi.allowedNetworks | quote }}
+  directoryMode: {{ .Values.csi.storageClasses.nfs.directoryMode | quote }}
+  quotaEnabled: {{ .Values.csi.storageClasses.nfs.quotaEnabled | quote }}
+  deleteData: {{ .Values.csi.storageClasses.nfs.deleteData | quote }}
+  nfsVersion: {{ .Values.csi.storageClasses.nfs.nfsVersion | quote }}
+  nfsExportPrefix: {{ .Values.csi.storageClasses.nfs.exportPrefix | quote }}
+  nfsRequirePrivilegedPort: {{ .Values.csi.storageClasses.nfs.requirePrivilegedPort | quote }}
+  nfsRootSquash: {{ .Values.csi.storageClasses.nfs.rootSquash | quote }}
+  nfsAnonymousUID: {{ .Values.csi.storageClasses.nfs.anonymousUID | quote }}
+  nfsAnonymousGID: {{ .Values.csi.storageClasses.nfs.anonymousGID | quote }}
+{{- end }}
+{{- if .Values.csi.storageClasses.smb.create }}
+{{- if .Values.csi.storageClasses.nfs.create }}
+---
+{{- end }}
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: {{ .Values.csi.storageClasses.smb.name }}
+  labels:
+    {{- include "cosi-driver-qumulo.labels" . | nindent 4 }}
+provisioner: {{ .Values.csi.driverName }}
+reclaimPolicy: {{ .Values.csi.storageClasses.smb.reclaimPolicy }}
+allowVolumeExpansion: true
+volumeBindingMode: Immediate
+parameters:
+  protocol: smb
+  basePath: {{ .Values.csi.basePath | quote }}
+  allowedNetworks: {{ join "," .Values.csi.allowedNetworks | quote }}
+  directoryMode: {{ .Values.csi.storageClasses.smb.directoryMode | quote }}
+  quotaEnabled: {{ .Values.csi.storageClasses.smb.quotaEnabled | quote }}
+  deleteData: {{ .Values.csi.storageClasses.smb.deleteData | quote }}
+  smbRequireEncryption: {{ .Values.csi.storageClasses.smb.requireEncryption | quote }}
+  smbAccessBasedEnumeration: {{ .Values.csi.storageClasses.smb.accessBasedEnumeration | quote }}
+  allowAllSMBUsers: {{ .Values.csi.storageClasses.smb.allowAllSMBUsers | quote }}
+{{ if .Values.csi.storageClasses.smb.allowAllSMBUsers }}
+{{ else if .Values.csi.storageClasses.smb.smbTrusteeAuthID }}
+  smbTrusteeAuthID: {{ .Values.csi.storageClasses.smb.smbTrusteeAuthID | quote }}
+{{ else }}
+  smbTrusteeDomain: {{ required "csi.storageClasses.smb.smbTrusteeDomain is required unless smbTrusteeAuthID or allowAllSMBUsers is set" .Values.csi.storageClasses.smb.smbTrusteeDomain | quote }}
+  smbTrusteeName: {{ required "csi.storageClasses.smb.smbTrusteeName is required unless smbTrusteeAuthID or allowAllSMBUsers is set" .Values.csi.storageClasses.smb.smbTrusteeName | quote }}
+{{ end }}
+  csi.storage.k8s.io/node-publish-secret-name: {{ required "csi.storageClasses.smb.credentialsSecret is required when the SMB StorageClass is enabled" .Values.csi.storageClasses.smb.credentialsSecret | quote }}
+  csi.storage.k8s.io/node-publish-secret-namespace: {{ .Release.Namespace | quote }}
+{{- end }}
+{{- end }}

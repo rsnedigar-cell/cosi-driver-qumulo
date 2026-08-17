@@ -1,0 +1,46 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: qumulo-cosi
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - rbac.yaml
+  - csidriver.yaml
+  - controller.yaml
+  - controller-pdb.yaml
+  - node.yaml
+  - storageclasses.yaml
+images:
+  - name: ghcr.io/rsnedigar-cell/cosi-driver-qumulo
+    newTag: "0.2.0-csi"
+replacements:
+  - source:
+      kind: ConfigMap
+      name: qumulo-csi-config
+      fieldPath: data.QUMULO_CSI_ALLOWED_NETWORKS
+    targets:
+      - select:
+          kind: StorageClass
+          name: qumulo-nfs
+        fieldPaths:
+          - parameters.allowedNetworks
+      - select:
+          kind: StorageClass
+          name: qumulo-smb
+        fieldPaths:
+          - parameters.allowedNetworks
+  - source:
+      kind: ConfigMap
+      name: qumulo-csi-config
+      fieldPath: data.QUMULO_CSI_BASE_PATH
+    targets:
+      - select:
+          kind: StorageClass
+          name: qumulo-nfs
+        fieldPaths:
+          - parameters.basePath
+      - select:
+          kind: StorageClass
+          name: qumulo-smb
+        fieldPaths:
+          - parameters.basePath

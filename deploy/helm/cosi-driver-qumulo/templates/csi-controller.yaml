@@ -1,0 +1,236 @@
+{{- if .Values.csi.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cosi-driver-qumulo.csiControllerName" . }}
+  labels:
+    {{- include "cosi-driver-qumulo.labels" . | nindent 4 }}
+    app.kubernetes.io/component: csi-controller
+spec:
+  replicas: {{ .Values.csi.controller.replicaCount }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      {{- include "cosi-driver-qumulo.csiSelectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: csi-controller
+  template:
+    metadata:
+      labels:
+        {{- include "cosi-driver-qumulo.csiSelectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: csi-controller
+    spec:
+      serviceAccountName: {{ include "cosi-driver-qumulo.csiControllerServiceAccountName" . }}
+      automountServiceAccountToken: false
+      priorityClassName: system-cluster-critical
+      nodeSelector:
+        kubernetes.io/os: linux
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "cosi-driver-qumulo.csiSelectorLabels" . | nindent 20 }}
+                    app.kubernetes.io/component: csi-controller
+      securityContext:
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: csi-provisioner
+          image: {{ .Values.csi.controller.provisionerImage }}
+          args:
+            - --v=2
+            - --csi-address=/csi/csi.sock
+            - --leader-election=true
+            - --leader-election-namespace=$(POD_NAMESPACE)
+            - --extra-create-metadata=true
+            - --feature-gates=VolumeAttributesClass=false
+            - --timeout=120s
+            - --worker-threads=10
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          resources:
+            {{- toYaml .Values.csi.controller.sidecarResources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+          volumeMounts:
+            - name: socket
+              mountPath: /csi
+            - name: kube-api-access
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
+        - name: csi-resizer
+          image: {{ .Values.csi.controller.resizerImage }}
+          args:
+            - --v=2
+            - --csi-address=/csi/csi.sock
+            - --leader-election=true
+            - --leader-election-namespace=$(POD_NAMESPACE)
+            - --feature-gates=VolumeAttributesClass=false
+            - --timeout=120s
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          resources:
+            {{- toYaml .Values.csi.controller.sidecarResources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+          volumeMounts:
+            - name: socket
+              mountPath: /csi
+            - name: kube-api-access
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
+        - name: liveness-probe
+          image: {{ .Values.csi.controller.livenessImage }}
+          args:
+            - --csi-address=/csi/csi.sock
+            - --probe-timeout=3s
+            - --http-endpoint=127.0.0.1:9808
+            - --v=2
+          ports:
+            - name: healthz
+              containerPort: 9808
+              protocol: TCP
+          resources:
+            {{- toYaml .Values.csi.controller.sidecarResources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+          volumeMounts:
+            - name: socket
+              mountPath: /csi
+        - name: qumulo-csi-controller
+          image: {{ include "cosi-driver-qumulo.csiImage" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/qumulo-csi-driver"]
+          args:
+            - --mode=controller
+            - --driver-address=unix:///csi/csi.sock
+            - {{ printf "--endpoint=%s" (required "qumulo.endpoint is required when csi.enabled=true" .Values.qumulo.endpoint) | quote }}
+            - {{ printf "--rest-port=%s" .Values.qumulo.restPort | quote }}
+            - {{ printf "--base-path=%s" .Values.csi.basePath | quote }}
+            - {{ printf "--version-floor=%s" .Values.qumulo.versionFloor | quote }}
+            - --handle-key-file=/etc/qumulo/handle-key/key
+            - {{ printf "--allowed-networks=%s" (required "csi.allowedNetworks must contain at least one restricted client network" (join "," .Values.csi.allowedNetworks)) | quote }}
+            {{- with .Values.csi.dataServer }}
+            - {{ printf "--data-server=%s" . | quote }}
+            {{- end }}
+          env:
+            - name: QUMULO_CSI_DRIVER_NAME
+              value: {{ .Values.csi.driverName | quote }}
+            - name: QUMULO_CA_FILE
+              value: {{ .Values.csi.caFile | quote }}
+            - name: QUMULO_INSECURE_SKIP_TLS_VERIFY
+              value: {{ .Values.csi.insecureSkipTLSVerify | quote }}
+          livenessProbe:
+            exec:
+              command:
+                - wget
+                - -q
+                - -T
+                - "3"
+                - -O
+                - /dev/null
+                - http://127.0.0.1:9808/healthz
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 5
+          readinessProbe:
+            exec:
+              command:
+                - wget
+                - -q
+                - -T
+                - "3"
+                - -O
+                - /dev/null
+                - http://127.0.0.1:9808/healthz
+            initialDelaySeconds: 3
+            periodSeconds: 10
+            timeoutSeconds: 3
+          resources:
+            {{- toYaml .Values.csi.controller.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+          volumeMounts:
+            - name: socket
+              mountPath: /csi
+            - name: credentials
+              mountPath: /etc/qumulo/credentials
+              readOnly: true
+            - name: handle-key
+              mountPath: /etc/qumulo/handle-key
+              readOnly: true
+      volumes:
+        - name: socket
+          emptyDir: {}
+        - name: credentials
+          secret:
+            secretName: {{ include "cosi-driver-qumulo.csiCredentialsSecret" . }}
+            defaultMode: 0440
+        - name: handle-key
+          secret:
+            secretName: {{ .Values.csi.handleKeySecret }}
+            defaultMode: 0440
+        - name: kube-api-access
+          projected:
+            defaultMode: 0444
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 3600
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+              - downwardAPI:
+                  items:
+                    - path: namespace
+                      fieldRef:
+                        apiVersion: v1
+                        fieldPath: metadata.namespace
+      terminationGracePeriodSeconds: 30
+{{- end }}

@@ -1,0 +1,11 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: qumulo-csi-controller
+  namespace: qumulo-cosi
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: qumulo-csi
+      app.kubernetes.io/component: controller

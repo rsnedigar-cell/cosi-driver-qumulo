@@ -1,0 +1,53 @@
+# Illustrative AWS CLI job. The amazon/aws-cli image often has no python3,
+# so JSON parsing of BucketInfo may fail. The supported smoke test is
+# deploy/examples/job-boto3.yaml.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: photos-put-get-awscli
+  namespace: app
+spec:
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: aws
+          image: amazon/aws-cli:2.17.0
+          env:
+            - name: AWS_EC2_METADATA_DISABLED
+              value: "true"
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              INFO=/cosi/BucketInfo
+              # Sidecar writes either BucketInfo JSON or flattened keys.
+              if [ -f "$INFO" ]; then
+                AK=$(python3 -c 'import json;print(json.load(open("/cosi/BucketInfo"))["spec"]["secretS3"]["accessKeyID"])')
+                SK=$(python3 -c 'import json;print(json.load(open("/cosi/BucketInfo"))["spec"]["secretS3"]["accessSecretKey"])')
+                EP=$(python3 -c 'import json;print(json.load(open("/cosi/BucketInfo"))["spec"]["secretS3"]["endpoint"])')
+                RG=$(python3 -c 'import json;print(json.load(open("/cosi/BucketInfo"))["spec"]["secretS3"]["region"])')
+                BN=$(python3 -c 'import json;print(json.load(open("/cosi/BucketInfo"))["spec"]["bucketName"])')
+              else
+                AK=$(cat /cosi/accessKeyID)
+                SK=$(cat /cosi/accessSecretKey)
+                EP=$(cat /cosi/endpoint)
+                RG=$(cat /cosi/region)
+                BN=$(cat /cosi/bucketName)
+              fi
+              export AWS_ACCESS_KEY_ID="$AK" AWS_SECRET_ACCESS_KEY="$SK" AWS_DEFAULT_REGION="$RG"
+              export AWS_REQUEST_CHECKSUM_CALCULATION=WHEN_REQUIRED
+              export AWS_RESPONSE_CHECKSUM_VALIDATION=WHEN_REQUIRED
+              # This image may not include python3; prefer job-boto3.yaml if parse fails.
+              echo hello | aws --endpoint-url "$EP" --no-verify-ssl s3 cp - "s3://$BN/hello.txt"
+              aws --endpoint-url "$EP" --no-verify-ssl s3 ls "s3://$BN"
+              aws --endpoint-url "$EP" --no-verify-ssl s3 cp "s3://$BN/hello.txt" -
+          volumeMounts:
+            - name: cosi
+              mountPath: /cosi
+              readOnly: true
+      volumes:
+        - name: cosi
+          secret:
+            secretName: photos-s3-creds

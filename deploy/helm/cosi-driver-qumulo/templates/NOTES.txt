@@ -1,0 +1,29 @@
+cosi-driver-qumulo {{ .Chart.AppVersion }} is installed in namespace {{ .Release.Namespace }}.
+
+1. Confirm the credentials Secret exists (the chart does not create it):
+
+   kubectl get secret {{ .Values.qumulo.existingSecret }} -n {{ .Release.Namespace }}
+
+2. Confirm the driver is 2/2:
+
+   kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/name={{ include "cosi-driver-qumulo.name" . }},app.kubernetes.io/instance={{ .Release.Name }}
+
+3. Create a BucketClass whose parameters.endpoint matches
+   {{ .Values.qumulo.endpoint | quote }}, or omit the class endpoint to inherit it.
+   That endpoint must be reachable from the driver pod.
+   Examples: deploy/examples/bucketclass.yaml
+   Full walkthrough: docs/install.md
+
+Driver name: {{ .Values.driverName }}
+Image: {{ include "cosi-driver-qumulo.image" . }}
+{{ if and .Values.metrics.enabled .Values.metrics.service.enabled }}
+Metrics: http://{{ include "cosi-driver-qumulo.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.metrics.port }}/metrics
+{{ else }}
+Metrics Service: disabled
+{{ end }}
+{{ if .Values.csi.enabled }}
+CSI driver: {{ .Values.csi.driverName }}
+Handle signing Secret: {{ .Values.csi.handleKeySecret }}
+NFS StorageClass: {{ ternary .Values.csi.storageClasses.nfs.name "disabled" .Values.csi.storageClasses.nfs.create }}
+SMB StorageClass: {{ ternary .Values.csi.storageClasses.smb.name "disabled" .Values.csi.storageClasses.smb.create }}
+{{ end }}

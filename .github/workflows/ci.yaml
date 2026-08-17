@@ -1,0 +1,237 @@
+name: ci
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE: ghcr.io/rsnedigar-cell/cosi-driver-qumulo
+  GOVULNCHECK_VERSION: v1.7.0
+  KUBECONFORM_VERSION: v0.8.0
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.26.6"
+          check-latest: false
+          cache: true
+      - name: gofmt
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then
+            echo "gofmt needed on:" >&2
+            echo "$out" >&2
+            exit 1
+          fi
+      - run: go vet ./...
+      - run: go vet -tags integration ./...
+      - run: go test -race ./...
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION} ./...
+      - uses: azure/setup-kubectl@776406bce94f63e41d621b960d78ee25c8b76ede # v4
+        with:
+          version: "v1.36.3"
+      - name: Render Kustomize manifests
+        # Rendering proves the overlays build; schema validation happens
+        # offline in the kubeconform step. (kubectl create --dry-run=client
+        # needs a reachable API server for discovery and cannot run in CI.)
+        run: |
+          kubectl kustomize deploy/kustomize > "${RUNNER_TEMP}/cosi-kustomize.yaml"
+          kubectl kustomize deploy/csi > "${RUNNER_TEMP}/csi-kustomize.yaml"
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
+        with:
+          version: "v3.18.6"
+      - name: Lint Helm chart
+        run: |
+          if helm lint --strict deploy/helm/cosi-driver-qumulo >"${RUNNER_TEMP}/missing-endpoint.log" 2>&1; then
+            echo "chart unexpectedly accepted an empty Qumulo endpoint" >&2
+            exit 1
+          fi
+          helm lint --strict deploy/helm/cosi-driver-qumulo \
+            --set qumulo.endpoint=qumulo.example.com
+          helm lint --strict deploy/helm/cosi-driver-qumulo \
+            --set csi.enabled=true \
+            --set qumulo.endpoint=qumulo.example.com \
+            --set-string 'csi.allowedNetworks[0]=10.0.0.0/8' \
+            --set csi.storageClasses.smb.credentialsSecret=qumulo-smb-credentials
+          helm template ci deploy/helm/cosi-driver-qumulo \
+            --namespace qumulo-cosi \
+            --set csi.enabled=true \
+            --set qumulo.endpoint=qumulo.example.com \
+            --set-string 'csi.allowedNetworks[0]=10.0.0.0/8' \
+            --set csi.storageClasses.smb.credentialsSecret=qumulo-smb-credentials \
+            > "${RUNNER_TEMP}/helm.yaml"
+          long_name=$(printf 'a%.0s' {1..63})
+          helm template long-name deploy/helm/cosi-driver-qumulo \
+            --namespace qumulo-cosi \
+            --set fullnameOverride="${long_name}" \
+            --set csi.enabled=true \
+            --set qumulo.endpoint=qumulo.example.com \
+            --set-string 'csi.allowedNetworks[0]=10.0.0.0/8' \
+            --set csi.storageClasses.smb.credentialsSecret=qumulo-smb-credentials \
+            > "${RUNNER_TEMP}/helm-long-name.yaml"
+          awk '/^  name: / { if (length($2) > 63) { print "overlong metadata.name: " $2 > "/dev/stderr"; bad=1 } } END { exit bad }' "${RUNNER_TEMP}/helm-long-name.yaml"
+          for suffix in csi-controller csi-node csi-provisioner csi-leader-election; do
+            grep -Eq "^  name: .*-${suffix}$" "${RUNNER_TEMP}/helm-long-name.yaml"
+          done
+      - name: Validate Kubernetes schemas
+        run: |
+          go run github.com/yannh/kubeconform/cmd/kubeconform@${KUBECONFORM_VERSION} \
+            -strict -summary -kubernetes-version 1.25.0 \
+            "${RUNNER_TEMP}/cosi-kustomize.yaml" \
+            "${RUNNER_TEMP}/csi-kustomize.yaml" \
+            "${RUNNER_TEMP}/helm.yaml" \
+            "${RUNNER_TEMP}/helm-long-name.yaml"
+
+  image-check:
+    if: github.event_name == 'pull_request'
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Build unprivileged pull-request image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          outputs: type=cacheonly
+          build-args: |
+            VERSION=pr.${{ github.event.pull_request.number }}.${{ github.sha }}
+            VCS_REF=${{ github.sha }}
+          pull: true
+          cache-from: type=gha
+
+  image:
+    if: github.event_name != 'pull_request'
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Resolve binary version
+        id: version
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            base_version=$(awk '$1 == "version:" { print $2; exit }' deploy/helm/cosi-driver-qumulo/Chart.yaml)
+            version="${base_version}-dev.${GITHUB_SHA::12}"
+          fi
+          echo "value=${version}" >> "${GITHUB_OUTPUT}"
+      - name: Verify release version alignment
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          chart_version=$(awk '$1 == "version:" { print $2; exit }' deploy/helm/cosi-driver-qumulo/Chart.yaml)
+          app_version=$(awk '$1 == "appVersion:" { gsub(/\"/, "", $2); print $2; exit }' deploy/helm/cosi-driver-qumulo/Chart.yaml)
+          values_tag=$(awk '$1 == "tag:" { gsub(/\"/, "", $2); print $2; exit }' deploy/helm/cosi-driver-qumulo/values.yaml)
+          kustomize_tag=$(awk '$1 == "newTag:" { gsub(/\"/, "", $2); print $2; exit }' deploy/kustomize/kustomization.yaml)
+          csi_kustomize_tag=$(awk '$1 == "newTag:" { gsub(/\"/, "", $2); print $2; exit }' deploy/csi/kustomization.yaml)
+          make_tag=$(awk '/^TAG \?=/ { print $3; exit }' Makefile)
+          cosi_source_version=$(awk -F'"' '/^var version =/ { print $2; exit }' cmd/qumulo-cosi-driver/main.go)
+          csi_source_version=$(awk -F'"' '/^var version =/ { print $2; exit }' cmd/qumulo-csi-driver/main.go)
+          if [[ "${version}" != "${chart_version}" || "${version}" != "${app_version}" || "${version}" != "${values_tag}" || "${version}" != "${kustomize_tag}" || "${version}-csi" != "${csi_kustomize_tag}" || "${version}" != "${make_tag}" || "${version}" != "${cosi_source_version}" || "${version}" != "${csi_source_version}" ]]; then
+            echo "tag ${version}, chart ${chart_version}/${app_version}, values ${values_tag}, COSI Kustomize ${kustomize_tag}, CSI Kustomize ${csi_kustomize_tag} (want ${version}-csi), Makefile ${make_tag}, and sources ${cosi_source_version}/${csi_source_version} must match" >&2
+            exit 1
+          fi
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ${{ env.IMAGE }}
+          flavor: latest=false
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=sha,prefix=sha-
+      - name: Login to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: CSI image metadata
+        id: metacsi
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ${{ env.IMAGE }}
+          flavor: |
+            latest=false
+            suffix=-csi
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=sha,prefix=sha-
+      - name: Build COSI image (distroless)
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          target: cosi
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: |
+            ${{ steps.meta.outputs.labels }}
+            org.opencontainers.image.version=${{ steps.version.outputs.value }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          build-args: |
+            VERSION=${{ steps.version.outputs.value }}
+            VCS_REF=${{ github.sha }}
+          pull: true
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Build CSI image (alpine + mount helpers)
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          target: csi
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.metacsi.outputs.tags }}
+          labels: |
+            ${{ steps.metacsi.outputs.labels }}
+            org.opencontainers.image.version=${{ steps.version.outputs.value }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          build-args: |
+            VERSION=${{ steps.version.outputs.value }}
+            VCS_REF=${{ github.sha }}
+          pull: true
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

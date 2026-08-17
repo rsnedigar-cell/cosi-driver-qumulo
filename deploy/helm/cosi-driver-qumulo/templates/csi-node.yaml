@@ -1,0 +1,168 @@
+{{- if .Values.csi.enabled }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "cosi-driver-qumulo.csiNodeName" . }}
+  labels:
+    {{- include "cosi-driver-qumulo.labels" . | nindent 4 }}
+    app.kubernetes.io/component: csi-node
+spec:
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      {{- include "cosi-driver-qumulo.csiSelectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: csi-node
+  template:
+    metadata:
+      labels:
+        {{- include "cosi-driver-qumulo.csiSelectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: csi-node
+    spec:
+      serviceAccountName: {{ include "cosi-driver-qumulo.csiNodeServiceAccountName" . }}
+      automountServiceAccountToken: false
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      priorityClassName: system-node-critical
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: node-driver-registrar
+          image: {{ .Values.csi.node.registrarImage }}
+          args:
+            - --v=2
+            - --csi-address=/csi/csi.sock
+            - {{ printf "--kubelet-registration-path=%s/plugins/%s/csi.sock" .Values.csi.node.kubeletPath .Values.csi.driverName | quote }}
+          resources:
+            {{- toYaml .Values.csi.node.sidecarResources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: socket
+              mountPath: /csi
+            - name: registration
+              mountPath: /registration
+        - name: liveness-probe
+          image: {{ .Values.csi.node.livenessImage }}
+          args:
+            - --csi-address=/csi/csi.sock
+            - --probe-timeout=3s
+            - --http-endpoint=127.0.0.1:9809
+            - --v=2
+          resources:
+            {{- toYaml .Values.csi.node.sidecarResources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: socket
+              mountPath: /csi
+        - name: qumulo-csi-node
+          image: {{ include "cosi-driver-qumulo.csiImage" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/qumulo-csi-driver"]
+          args:
+            - --mode=node
+            - --driver-address=unix:///csi/csi.sock
+            - --node-id=$(NODE_ID)
+            - {{ printf "--endpoint=%s" (required "qumulo.endpoint is required when csi.enabled=true" .Values.qumulo.endpoint) | quote }}
+            - {{ printf "--rest-port=%s" .Values.qumulo.restPort | quote }}
+            - {{ printf "--base-path=%s" .Values.csi.basePath | quote }}
+            - {{ printf "--version-floor=%s" .Values.qumulo.versionFloor | quote }}
+            - {{ printf "--kubelet-root=%s" .Values.csi.node.kubeletPath | quote }}
+            - --handle-key-file=/etc/qumulo/handle-key/key
+            - {{ printf "--allowed-networks=%s" (required "csi.allowedNetworks must contain at least one restricted client network" (join "," .Values.csi.allowedNetworks)) | quote }}
+            {{- with .Values.csi.dataServer }}
+            - {{ printf "--data-server=%s" . | quote }}
+            {{- end }}
+          env:
+            - name: NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: QUMULO_CSI_DRIVER_NAME
+              value: {{ .Values.csi.driverName | quote }}
+            - name: QUMULO_CSI_STATE_DIR
+              value: /var/lib/qumulo-csi
+            - name: QUMULO_CA_FILE
+              value: {{ .Values.csi.caFile | quote }}
+            - name: QUMULO_INSECURE_SKIP_TLS_VERIFY
+              value: {{ .Values.csi.insecureSkipTLSVerify | quote }}
+          livenessProbe:
+            httpGet:
+              host: 127.0.0.1
+              path: /healthz
+              port: 9809
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 5
+          readinessProbe:
+            httpGet:
+              host: 127.0.0.1
+              path: /healthz
+              port: 9809
+            initialDelaySeconds: 3
+            periodSeconds: 10
+            timeoutSeconds: 3
+          resources:
+            {{- toYaml .Values.csi.node.resources | nindent 12 }}
+          securityContext:
+            privileged: true
+            allowPrivilegeEscalation: true
+            runAsUser: 0
+            runAsGroup: 0
+          volumeMounts:
+            - name: socket
+              mountPath: /csi
+            - name: kubelet
+              mountPath: {{ .Values.csi.node.kubeletPath }}
+              mountPropagation: Bidirectional
+            - name: state
+              mountPath: /var/lib/qumulo-csi
+            - name: handle-key
+              mountPath: /etc/qumulo/handle-key
+              readOnly: true
+      volumes:
+        - name: socket
+          hostPath:
+            path: {{ printf "%s/plugins/%s" .Values.csi.node.kubeletPath .Values.csi.driverName }}
+            type: DirectoryOrCreate
+        - name: registration
+          hostPath:
+            path: {{ printf "%s/plugins_registry" .Values.csi.node.kubeletPath }}
+            type: Directory
+        - name: kubelet
+          hostPath:
+            path: {{ .Values.csi.node.kubeletPath }}
+            type: Directory
+        - name: state
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi
+        - name: handle-key
+          secret:
+            secretName: {{ .Values.csi.handleKeySecret }}
+            defaultMode: 0400
+      {{- with .Values.csi.node.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.csi.node.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      terminationGracePeriodSeconds: 30
+{{- end }}

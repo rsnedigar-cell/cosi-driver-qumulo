@@ -1,0 +1,14 @@
+# Send only the files used by the allowlisted Dockerfile COPY instructions.
+# This keeps credentials, VCS history, local binaries, and coverage output out
+# of both the remote builder and its exported layer cache.
+**
+!go.mod
+!go.sum
+!LICENSE
+!NOTICE
+!cmd/
+!cmd/**
+!internal/
+!internal/**
+!third_party/
+!third_party/**

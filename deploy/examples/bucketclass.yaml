@@ -1,0 +1,42 @@
+# Set parameters.endpoint to a hostname or IP that *pods* can resolve.
+# Do not put :8000 / :9000 in endpoint; use restPort / s3Port.
+apiVersion: objectstorage.k8s.io/v1alpha1
+kind: BucketClass
+metadata:
+  name: qumulo-gold
+driverName: s3.qumulo.com
+deletionPolicy: Delete
+parameters:
+  endpoint: "qumulo.example.internal"
+  restPort: "8000"
+  s3Port: "9000"
+  # The packaged driver reads the directly mounted qumulo-cosi-creds Secret.
+  basePath: "/k8s-buckets"
+  deleteRootDir: "true"
+  purgeOnDelete: "false"
+  # Keep verification enabled. Mount ca.crt for a private CA; use "true" only
+  # for a disposable lab.
+  insecureSkipTLSVerify: "false"
+  region: "us-east-1"
+  # Optional. Leave unset for a first bring-up.
+  # versioning: "Enabled"
+  # objectLockEnabled: "false"
+  # quotaLimit: "10737418240"
+---
+apiVersion: objectstorage.k8s.io/v1alpha1
+kind: BucketAccessClass
+metadata:
+  name: qumulo-rw
+driverName: s3.qumulo.com
+authenticationType: Key
+parameters:
+  accessMode: "rw"
+---
+apiVersion: objectstorage.k8s.io/v1alpha1
+kind: BucketAccessClass
+metadata:
+  name: qumulo-ro
+driverName: s3.qumulo.com
+authenticationType: Key
+parameters:
+  accessMode: "ro"

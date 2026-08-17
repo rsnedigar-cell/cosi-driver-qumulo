@@ -1,0 +1,157 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/rsnedigar-cell/cosi-driver-qumulo
+  tag: "0.2.0"
+  # When set, the immutable digest takes precedence over tag.
+  digest: ""
+  pullPolicy: IfNotPresent
+
+# Same-account Amazon ECR usually needs no pull secret (node instance role).
+imagePullSecrets: []
+
+sidecar:
+  # v0.2.2 is the last v1alpha1 sidecar. Its controller always uses a
+  # namespace-scoped Lease, so replicaCount may be increased for HA.
+  image: registry.k8s.io/sig-storage/objectstorage-sidecar:v0.2.2@sha256:c7166a73a303c43c8c1dca3e81aacf2fa85e98b46bcab0b64249cde19fa67979
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      memory: 128Mi
+
+driverName: s3.qumulo.com
+
+metrics:
+  enabled: true
+  port: 8081
+  service:
+    enabled: true
+    type: ClusterIP
+    annotations: {}
+
+qumulo:
+  endpoint: ""
+  restPort: "8000"
+  s3Port: "9000"
+  region: us-east-1
+  basePath: /k8s-buckets
+  versionFloor: "7.2.0"
+  # Create this Secret before installing. The chart does not mint credentials.
+  #   kubectl create secret generic qumulo-cosi-creds -n qumulo-cosi --from-literal=token='...'
+  existingSecret: qumulo-cosi-creds
+
+serviceAccount:
+  create: true
+  # Defaults to the release fullname when empty.
+  name: ""
+  annotations: {}
+
+rbac:
+  create: true
+
+# Dynamic NFS and SMB PersistentVolumes use the CSI driver in the same image.
+# COSI remains enabled independently above. Set csi.enabled=true only after
+# configuring the process-bound Qumulo endpoint and restricted client networks.
+csi:
+  enabled: false
+  # CSI runtime image: defaults to <image.repository>:<image.tag>-csi (the
+  # Alpine image with mount helpers). The COSI driver keeps the distroless
+  # image above. Override with an explicit ref or digest if needed.
+  image: ""
+  imageDigest: ""
+  driverName: file.qumulo.com
+  dataServer: ""
+  basePath: /k8s-volumes
+  allowedNetworks: []
+  existingSecret: "" # Defaults to qumulo.existingSecret.
+  handleKeySecret: qumulo-csi-handle-key
+  caFile: ""
+  insecureSkipTLSVerify: false
+  rbac:
+    create: true
+  serviceAccount:
+    create: true
+    controllerName: ""
+    nodeName: ""
+    annotations: {}
+
+  controller:
+    replicaCount: 2
+    provisionerImage: registry.k8s.io/sig-storage/csi-provisioner:v6.3.0@sha256:a4b0b1a37605b7b04a293e136edf7006ec1786a8eb3f4e5a945f81d667dcc371
+    resizerImage: registry.k8s.io/sig-storage/csi-resizer:v2.2.1@sha256:ea1d25e23479000c7e8eeb92d827df66258df4e482ca054c5e7ce3fc0f5c41a5
+    livenessImage: registry.k8s.io/sig-storage/livenessprobe:v2.19.0@sha256:06da0d5b8908072f2e4522692aee8dc119fba7247a9658497e1153992cd777e9
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        memory: 256Mi
+    sidecarResources:
+      requests:
+        cpu: 10m
+        memory: 20Mi
+      limits:
+        memory: 256Mi
+
+  node:
+    registrarImage: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.17.0@sha256:f9de845b170155199f2a2a3f9531cf13d78e31235e9db6b6582a8b0db0a50dad
+    livenessImage: registry.k8s.io/sig-storage/livenessprobe:v2.19.0@sha256:06da0d5b8908072f2e4522692aee8dc119fba7247a9658497e1153992cd777e9
+    kubeletPath: /var/lib/kubelet
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        memory: 256Mi
+    sidecarResources:
+      requests:
+        cpu: 10m
+        memory: 20Mi
+      limits:
+        memory: 100Mi
+    nodeSelector:
+      kubernetes.io/os: linux
+    tolerations:
+      - operator: Exists
+
+  storageClasses:
+    nfs:
+      create: true
+      name: qumulo-nfs
+      reclaimPolicy: Delete
+      directoryMode: "0777"
+      quotaEnabled: true
+      deleteData: true
+      nfsVersion: "4.1"
+      exportPrefix: /k8s
+      requirePrivilegedPort: false
+      rootSquash: true
+      anonymousUID: 65534
+      anonymousGID: 65534
+    smb:
+      create: true
+      name: qumulo-smb
+      reclaimPolicy: Delete
+      directoryMode: "0777"
+      quotaEnabled: true
+      deleteData: true
+      requireEncryption: true
+      accessBasedEnumeration: true
+      smbTrusteeAuthID: ""
+      smbTrusteeDomain: LOCAL
+      smbTrusteeName: k8s-smb
+      allowAllSMBUsers: false
+      credentialsSecret: ""
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 256Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

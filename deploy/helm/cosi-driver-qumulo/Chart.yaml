@@ -1,0 +1,24 @@
+apiVersion: v2
+name: cosi-driver-qumulo
+description: Kubernetes COSI and NFS/SMB CSI drivers for Qumulo
+type: application
+version: 0.2.0
+appVersion: "0.2.0"
+kubeVersion: ">=1.25.0-0"
+home: https://github.com/rsnedigar-cell/cosi-driver-qumulo
+sources:
+  - https://github.com/rsnedigar-cell/cosi-driver-qumulo
+maintainers:
+  - name: rsnedigar-cell
+    url: https://github.com/rsnedigar-cell
+keywords:
+  - cosi
+  - csi
+  - qumulo
+  - s3
+  - nfs
+  - smb
+  - object-storage
+annotations:
+  artifacthub.io/license: Apache-2.0
+  artifacthub.io/prerelease: "false"
