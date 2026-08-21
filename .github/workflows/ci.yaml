@@ -53,6 +53,7 @@ jobs:
         run: |
           kubectl kustomize deploy/kustomize > "${RUNNER_TEMP}/cosi-kustomize.yaml"
           kubectl kustomize deploy/csi > "${RUNNER_TEMP}/csi-kustomize.yaml"
+          kubectl kustomize deploy/csi/snapshots > "${RUNNER_TEMP}/csi-snapshots-kustomize.yaml"
       - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
         with:
           version: "v3.18.6"
@@ -76,6 +77,14 @@ jobs:
             --set-string 'csi.allowedNetworks[0]=10.0.0.0/8' \
             --set csi.storageClasses.smb.credentialsSecret=qumulo-smb-credentials \
             > "${RUNNER_TEMP}/helm.yaml"
+          helm template ci-snap deploy/helm/cosi-driver-qumulo \
+            --namespace qumulo-cosi \
+            --set csi.enabled=true \
+            --set csi.snapshots.enabled=true \
+            --set qumulo.endpoint=qumulo.example.com \
+            --set-string 'csi.allowedNetworks[0]=10.0.0.0/8' \
+            --set csi.storageClasses.smb.credentialsSecret=qumulo-smb-credentials \
+            > "${RUNNER_TEMP}/helm-snapshots.yaml"
           long_name=$(printf 'a%.0s' {1..63})
           helm template long-name deploy/helm/cosi-driver-qumulo \
             --namespace qumulo-cosi \
@@ -95,7 +104,9 @@ jobs:
             -strict -summary -kubernetes-version 1.25.0 \
             "${RUNNER_TEMP}/cosi-kustomize.yaml" \
             "${RUNNER_TEMP}/csi-kustomize.yaml" \
+            "${RUNNER_TEMP}/csi-snapshots-kustomize.yaml" \
             "${RUNNER_TEMP}/helm.yaml" \
+            "${RUNNER_TEMP}/helm-snapshots.yaml" \
             "${RUNNER_TEMP}/helm-long-name.yaml"
 
   image-check:

@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- CSI volume snapshots for `file.qumulo.com`: CreateSnapshot, DeleteSnapshot,
+  and restore into a new volume from a snapshot dataSource. Qumulo directory
+  snapshots are instantaneous; restore is a server-side tree copy. The
+  snapshotter sidecar is off by default (Helm `csi.snapshots.enabled`,
+  Kustomize overlay `deploy/csi/snapshots`) so clusters without snapshot CRDs
+  keep a working CSI install. Unit-tested against the fake Qumulo server;
+  live verification is pending.
+
 ## 0.2.0 - 2026-08-17
 
 First public release. Adds the `file.qumulo.com` NFS/SMB CSI driver beside

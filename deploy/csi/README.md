@@ -10,6 +10,10 @@ First complete the Qumulo setup in
 effective and inheritable access below that path. The least-privilege role
 cannot create the top-level root from `/` by itself.
 
+Volume snapshots are optional. Install the Kubernetes snapshot CRDs first,
+then apply `deploy/csi/snapshots` or set Helm `csi.snapshots.enabled=true`.
+See `docs/csi.md`.
+
 Before applying it:
 
 ```bash

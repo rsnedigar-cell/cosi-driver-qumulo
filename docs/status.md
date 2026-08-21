@@ -80,6 +80,19 @@ Live-proven on Core **7.9.2.2** (2026-08-17):
   and directory quota, and ordered teardown that removed the exports,
   shares, and backing directories (`deleteData: "true"`).
 
+CSI volume snapshots (create/delete/restore-copy) are **unit-tested against
+the fake server only**. They are not live-verified. Assumed REST shapes
+pending a live lock:
+
+| Surface | Assumed shape |
+|---|---|
+| `POST /v3/snapshots/` | `{name_suffix, source_file_id, expiration:""}` → snapshot object; visible name `<id>_<suffix>` |
+| `GET /v3/snapshots/` | Required `filter` query; `{entries, paging}`; `id` is a JSON number |
+| `DELETE /v3/snapshots/{id}` | 202; 404 treated as success |
+| Directory listing | `GET /v1/files/{ref}/entries/?snapshot=<id>` |
+| File restore | `POST /v1/files/{dest}/copy-chunk` with `source_path`/`source_id` + `source_snapshot` |
+| Feature floor | Directory snapshots gated at Core 5.3.3 (pending confirmation of the v3 introducing version) |
+
 Remaining validation gaps, stated plainly: AD/LDAP SMB trustees were not
 exercised (local trustee only; explicitly deprioritized by the project
 owner); the arm64 image has never run on ARM hardware; and the

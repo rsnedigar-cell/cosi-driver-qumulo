@@ -278,8 +278,68 @@ With `deleteData: false`, the directory and its data remain after the
 protocol resource is removed. `reclaimPolicy: Retain` prevents Kubernetes
 from asking the driver to delete the volume at all.
 
-Snapshots, cloning, raw block volumes, Windows node mounting, tenant-aware
-preview APIs, and volume shrinking are not supported in this release.
+## Snapshots
+
+The CSI driver can create Qumulo directory snapshots and restore them into
+**new** volumes. Create, delete, and restore are implemented; they are
+unit-tested against a fake Qumulo server and **not yet live-verified**.
+Qumulo snapshots are copy-on-write and instantaneous. Restore walks the
+snapshot and copies files server-side, so restore time grows with data size.
+
+This is unreleased relative to v0.2.0. Do not claim it proven until
+`docs/status.md` says so.
+
+### Cluster prerequisites
+
+Install the Kubernetes snapshot CRDs and snapshot-controller **before**
+enabling the sidecar. A snapshotter sidecar crashloops if the CRDs are
+absent. Pin the same external-snapshotter release used by the sidecar
+(v8.2.1):
+
+```bash
+kubectl apply -k "https://github.com/kubernetes-csi/external-snapshotter/client/config/crd?ref=v8.2.1"
+kubectl apply -k "https://github.com/kubernetes-csi/external-snapshotter/deploy/kubernetes/snapshot-controller?ref=v8.2.1"
+```
+
+### Enable the sidecar
+
+Helm (default `csi.snapshots.enabled=false`):
+
+```bash
+helm upgrade --install qumulo-cosi deploy/helm/cosi-driver-qumulo \
+  --namespace qumulo-cosi --create-namespace \
+  --set qumulo.endpoint=qumulo.example.internal \
+  --set csi.enabled=true \
+  --set csi.snapshots.enabled=true \
+  --set-string 'csi.allowedNetworks[0]=10.0.0.0/8'
+```
+
+Kustomize keeps the sidecar **out** of `deploy/csi` so a default apply stays
+safe. After the CRDs exist:
+
+```bash
+kubectl apply -k deploy/csi/snapshots
+```
+
+Worked examples: `deploy/csi/example-snapshots.yaml` (not part of the
+default Kustomize render). Restore PVCs may use either the NFS or SMB
+StorageClass; directory data is protocol-agnostic.
+
+Large restores can exceed the default CSI provisioner timeout (`120s` in
+this chart). Increase `--timeout` on the provisioner if restore jobs abort.
+
+### DeleteVolume guard
+
+`DeleteVolume` with `deleteData: true` fails `FAILED_PRECONDITION` while any
+driver-created snapshot (`csi-` name suffix) still exists for that
+directory. Delete the VolumeSnapshot objects first.
+
+Users will see a `.snapshot/` directory inside NFS/SMB mounts. Restores skip
+that directory and never recurse into it.
+
+Cloning, ListSnapshots, group snapshots, snapshot expiry/scheduling, raw
+block volumes, Windows node mounting, tenant-aware preview APIs, and volume
+shrinking are not supported in this release.
 
 ## Network requirements
 

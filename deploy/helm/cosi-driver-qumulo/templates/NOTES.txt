@@ -26,4 +26,5 @@ CSI driver: {{ .Values.csi.driverName }}
 Handle signing Secret: {{ .Values.csi.handleKeySecret }}
 NFS StorageClass: {{ ternary .Values.csi.storageClasses.nfs.name "disabled" .Values.csi.storageClasses.nfs.create }}
 SMB StorageClass: {{ ternary .Values.csi.storageClasses.smb.name "disabled" .Values.csi.storageClasses.smb.create }}
+CSI snapshots sidecar: {{ ternary "enabled" "disabled" .Values.csi.snapshots.enabled }}
 {{ end }}

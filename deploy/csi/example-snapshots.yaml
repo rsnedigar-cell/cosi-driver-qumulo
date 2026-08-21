@@ -1,0 +1,36 @@
+# Examples only — not included in the default Kustomize render (kubeconform
+# has no VolumeSnapshotClass schema in its default catalog).
+# Prerequisites: snapshot.storage.k8s.io CRDs + snapshot-controller.
+# Enable the sidecar: kubectl apply -k deploy/csi/snapshots
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshotClass
+metadata:
+  name: qumulo-csi-snapshot
+driver: file.qumulo.com
+deletionPolicy: Delete
+---
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshot
+metadata:
+  name: photos-snap
+  namespace: app
+spec:
+  volumeSnapshotClassName: qumulo-csi-snapshot
+  source:
+    persistentVolumeClaimName: photos-nfs
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: photos-nfs-restore
+  namespace: app
+spec:
+  accessModes: ["ReadWriteMany"]
+  storageClassName: qumulo-nfs
+  resources:
+    requests:
+      storage: 10Gi
+  dataSource:
+    name: photos-snap
+    kind: VolumeSnapshot
+    apiGroup: snapshot.storage.k8s.io

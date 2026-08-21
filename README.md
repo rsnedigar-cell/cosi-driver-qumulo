@@ -76,6 +76,8 @@ The CSI controller creates a directory, a non-shrinking directory quota by
 default, and either an NFS export or SMB share. Linux node plug-ins mount that
 data path directly; file traffic does not pass through the controller. NFS
 versions 3 and 4.1 are supported. SMB mounts are fixed to SMB 3.1.1.
+CSI volume snapshots (create/delete/restore-into-new-volume) are implemented
+and unit-tested **(unreleased; not yet live-verified)**.
 
 ## Use
 
