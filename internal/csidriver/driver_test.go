@@ -2,6 +2,7 @@ package csidriver
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -47,6 +48,13 @@ type fakeBackend struct {
 	directory      string
 	directoryModes []string
 	spec           string
+
+	snapshots       []*qumulo.Snapshot
+	snapshotSeq     int
+	copyErr         error
+	copiedSnapshot  string
+	copiedDest      string
+	snapshotFeature error
 }
 
 func (f *fakeBackend) EnsureVersion(context.Context, string) (string, error) { return "7.9.2", nil }
@@ -128,6 +136,67 @@ func (f *fakeBackend) FileAttributes(context.Context, string) (*qumulo.FileAttri
 }
 func (f *fakeBackend) TreeDelete(_ context.Context, id string) error {
 	f.treeDelete = id
+	return nil
+}
+
+func (f *fakeBackend) EnsureSnapshotFeature(context.Context) error { return f.snapshotFeature }
+
+func (f *fakeBackend) CreateSnapshot(_ context.Context, directoryID, suffix string) (*qumulo.Snapshot, error) {
+	f.snapshotSeq++
+	var snap qumulo.Snapshot
+	raw, _ := json.Marshal(map[string]any{
+		"id": f.snapshotSeq, "name": fmt.Sprintf("%d_%s", f.snapshotSeq, suffix),
+		"timestamp": "2026-08-17T00:00:00Z", "source_file_id": directoryID,
+	})
+	_ = json.Unmarshal(raw, &snap)
+	f.snapshots = append(f.snapshots, &snap)
+	return &snap, nil
+}
+
+func (f *fakeBackend) FindSnapshot(_ context.Context, directoryID, suffix string) (*qumulo.Snapshot, error) {
+	for _, snap := range f.snapshots {
+		if snap.SourceFileID == directoryID && snap.NameSuffix() == suffix && !snap.InDelete {
+			return snap, nil
+		}
+	}
+	return nil, nil
+}
+
+func (f *fakeBackend) GetSnapshot(_ context.Context, id string) (*qumulo.Snapshot, error) {
+	for _, snap := range f.snapshots {
+		if snap.IDString() == id {
+			return snap, nil
+		}
+	}
+	return nil, errVolumeNotFound
+}
+
+func (f *fakeBackend) DeleteSnapshot(_ context.Context, id string) error {
+	kept := f.snapshots[:0]
+	for _, snap := range f.snapshots {
+		if snap.IDString() != id {
+			kept = append(kept, snap)
+		}
+	}
+	f.snapshots = kept
+	return nil
+}
+
+func (f *fakeBackend) HasDriverSnapshots(_ context.Context, directoryID string) (bool, error) {
+	for _, snap := range f.snapshots {
+		if snap.SourceFileID == directoryID && strings.HasPrefix(snap.NameSuffix(), qumulo.SnapshotNamePrefix) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (f *fakeBackend) CopySnapshotTree(_ context.Context, _, _, snapshotID, destPath string) error {
+	if f.copyErr != nil {
+		return f.copyErr
+	}
+	f.copiedSnapshot = snapshotID
+	f.copiedDest = destPath
 	return nil
 }
 

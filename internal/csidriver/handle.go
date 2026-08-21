@@ -12,7 +12,95 @@ import (
 	"strings"
 )
 
-const volumeHandlePrefix = "qv1:"
+const (
+	volumeHandlePrefix   = "qv1:"
+	snapshotHandlePrefix = "qs1:"
+)
+
+type snapshotHandle struct {
+	Endpoint        string `json:"endpoint"`
+	RESTPort        string `json:"restPort"`
+	SnapshotID      string `json:"snapshotID"`
+	SourceDirectory string `json:"sourceDirectoryID"`
+	SourceFSPath    string `json:"sourceFSPath"`
+	NameSuffix      string `json:"nameSuffix"`
+}
+
+func (h snapshotHandle) encode(key []byte) (string, error) {
+	if len(key) < 32 {
+		return "", fmt.Errorf("CSI handle signing key must contain at least 32 bytes")
+	}
+	if err := h.validate(); err != nil {
+		return "", err
+	}
+	raw, err := json.Marshal(h)
+	if err != nil {
+		return "", fmt.Errorf("encode snapshot handle: %w", err)
+	}
+	payload := base64.RawURLEncoding.EncodeToString(raw)
+	return snapshotHandlePrefix + payload + "." + signPrefixedHandle(snapshotHandlePrefix, payload, key), nil
+}
+
+func decodeSnapshotHandle(raw string, cfg Config) (snapshotHandle, error) {
+	if len(cfg.HandleKey) < 32 {
+		return snapshotHandle{}, fmt.Errorf("CSI handle signing key is unavailable")
+	}
+	if !strings.HasPrefix(raw, snapshotHandlePrefix) {
+		return snapshotHandle{}, fmt.Errorf("invalid snapshot ID format")
+	}
+	encoded := strings.TrimPrefix(raw, snapshotHandlePrefix)
+	payloadPart, signature, ok := strings.Cut(encoded, ".")
+	if !ok || signature == "" || !hmac.Equal([]byte(signature), []byte(signPrefixedHandle(snapshotHandlePrefix, payloadPart, cfg.HandleKey))) {
+		return snapshotHandle{}, fmt.Errorf("snapshot ID signature is invalid")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(payloadPart)
+	if err != nil {
+		return snapshotHandle{}, fmt.Errorf("decode snapshot ID: %w", err)
+	}
+	var h snapshotHandle
+	dec := json.NewDecoder(strings.NewReader(string(payload)))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&h); err != nil {
+		return snapshotHandle{}, fmt.Errorf("decode snapshot ID: %w", err)
+	}
+	if err := h.validate(); err != nil {
+		return snapshotHandle{}, err
+	}
+	if cfg.Endpoint != "" && !sameEndpoint(h.Endpoint, cfg.Endpoint) {
+		return snapshotHandle{}, fmt.Errorf("snapshot endpoint does not match this driver instance")
+	}
+	if cfg.Endpoint != "" {
+		configuredPort, err := configuredRESTPort(cfg.Endpoint, cfg.RESTPort)
+		if err != nil || h.RESTPort != configuredPort {
+			return snapshotHandle{}, fmt.Errorf("snapshot REST port does not match this driver instance")
+		}
+	}
+	return h, nil
+}
+
+func (h snapshotHandle) validate() error {
+	if h.Endpoint == "" || h.RESTPort == "" || h.SnapshotID == "" || h.SourceDirectory == "" || h.SourceFSPath == "" || h.NameSuffix == "" {
+		return fmt.Errorf("snapshot ID is missing required fields")
+	}
+	if !strings.HasPrefix(h.NameSuffix, qumuloSnapshotPrefix) {
+		return fmt.Errorf("snapshot name suffix is not driver-owned")
+	}
+	if strings.ContainsAny(h.SourceFSPath+h.Endpoint, "\x00\r\n") || !strings.HasPrefix(h.SourceFSPath, "/") || h.SourceFSPath == "/" || path.Clean(h.SourceFSPath) != h.SourceFSPath {
+		return fmt.Errorf("snapshot filesystem path is unsafe")
+	}
+	port, err := strconv.ParseUint(h.RESTPort, 10, 16)
+	if err != nil || port == 0 {
+		return fmt.Errorf("snapshot REST port is invalid")
+	}
+	return nil
+}
+
+func snapshotNameSuffix(csiName string) string {
+	sum := sha256.Sum256([]byte(csiName))
+	return qumuloSnapshotPrefix + hex.EncodeToString(sum[:8])
+}
+
+const qumuloSnapshotPrefix = "csi-"
 
 type volumeHandle struct {
 	Protocol        protocol `json:"protocol"`
@@ -88,8 +176,12 @@ func decodeVolumeHandle(raw string, cfg Config) (volumeHandle, error) {
 }
 
 func signVolumeHandle(payload string, key []byte) string {
+	return signPrefixedHandle(volumeHandlePrefix, payload, key)
+}
+
+func signPrefixedHandle(prefix, payload string, key []byte) string {
 	mac := hmac.New(sha256.New, key)
-	_, _ = mac.Write([]byte(volumeHandlePrefix))
+	_, _ = mac.Write([]byte(prefix))
 	_, _ = mac.Write([]byte(payload))
 	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }

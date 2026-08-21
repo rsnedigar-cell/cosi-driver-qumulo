@@ -20,6 +20,8 @@ var (
 	errVolumeNotFound        = errors.New("volume no longer exists")
 	errVolumeIdentityChanged = errors.New("volume resource identity changed")
 	errVolumeResourceMissing = errors.New("volume resource is missing before deletion was claimed")
+	errSnapshotsPresent      = errors.New("volume has driver-created snapshots; delete VolumeSnapshot objects first")
+	errSnapshotsUnsupported  = errors.New("Qumulo Core does not support directory snapshots")
 )
 
 type storageResource struct {
@@ -40,6 +42,13 @@ type storageBackend interface {
 	DeleteVolumeResource(context.Context, volumeHandle, bool) error
 	FileAttributes(context.Context, string) (*qumulo.FileAttributes, error)
 	TreeDelete(context.Context, string) error
+	EnsureSnapshotFeature(context.Context) error
+	CreateSnapshot(context.Context, string, string) (*qumulo.Snapshot, error)
+	FindSnapshot(context.Context, string, string) (*qumulo.Snapshot, error)
+	GetSnapshot(context.Context, string) (*qumulo.Snapshot, error)
+	DeleteSnapshot(context.Context, string) error
+	HasDriverSnapshots(context.Context, string) (bool, error)
+	CopySnapshotTree(context.Context, string, string, string, string) error
 }
 
 type qumuloBackend struct {
@@ -421,6 +430,45 @@ func (b *qumuloBackend) FileAttributes(ctx context.Context, fsPath string) (*qum
 
 func (b *qumuloBackend) TreeDelete(ctx context.Context, fileID string) error {
 	return b.conn.TreeDelete(ctx, fileID)
+}
+
+func (b *qumuloBackend) EnsureSnapshotFeature(ctx context.Context) error {
+	version, err := b.conn.EnsureVersion(ctx, "")
+	if err != nil {
+		return err
+	}
+	ok, min, err := qumulo.Supports(version, qumulo.FeatureSnapshots)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("%w (requires Core %s+)", errSnapshotsUnsupported, min)
+	}
+	return nil
+}
+
+func (b *qumuloBackend) CreateSnapshot(ctx context.Context, directoryID, suffix string) (*qumulo.Snapshot, error) {
+	return b.conn.CreateSnapshot(ctx, directoryID, suffix)
+}
+
+func (b *qumuloBackend) FindSnapshot(ctx context.Context, directoryID, suffix string) (*qumulo.Snapshot, error) {
+	return b.conn.FindSnapshotBySuffix(ctx, directoryID, suffix)
+}
+
+func (b *qumuloBackend) GetSnapshot(ctx context.Context, id string) (*qumulo.Snapshot, error) {
+	return b.conn.GetSnapshot(ctx, id)
+}
+
+func (b *qumuloBackend) DeleteSnapshot(ctx context.Context, id string) error {
+	return b.conn.DeleteSnapshot(ctx, id)
+}
+
+func (b *qumuloBackend) HasDriverSnapshots(ctx context.Context, directoryID string) (bool, error) {
+	return b.conn.HasDriverSnapshots(ctx, directoryID)
+}
+
+func (b *qumuloBackend) CopySnapshotTree(ctx context.Context, sourcePath, sourceDirID, snapshotID, destPath string) error {
+	return b.conn.CopySnapshotTree(ctx, sourcePath, sourceDirID, snapshotID, destPath)
 }
 
 type immutableVolumeSpec struct {

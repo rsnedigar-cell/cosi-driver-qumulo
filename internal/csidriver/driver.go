@@ -9,10 +9,12 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/timestamppb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 
 	"github.com/rsnedigar-cell/cosi-driver-qumulo/internal/qumulo"
@@ -100,8 +102,17 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 	}
 	unlock := d.lockCreateName("name\x00" + req.GetName())
 	defer unlock()
-	if req.GetVolumeContentSource() != nil {
-		return nil, status.Error(codes.InvalidArgument, "volume cloning and snapshot sources are not supported")
+	var sourceSnap *snapshotHandle
+	if src := req.GetVolumeContentSource(); src != nil {
+		snapSrc := src.GetSnapshot()
+		if snapSrc == nil || strings.TrimSpace(snapSrc.GetSnapshotId()) == "" {
+			return nil, status.Error(codes.InvalidArgument, "volume cloning is not supported; snapshot sources are required")
+		}
+		decoded, err := decodeSnapshotHandle(snapSrc.GetSnapshotId(), d.cfg)
+		if err != nil {
+			return nil, status.Error(codes.InvalidArgument, err.Error())
+		}
+		sourceSnap = &decoded
 	}
 	opts, err := parseVolumeOptions(d.cfg, req.GetName(), req.GetParameters())
 	if err != nil {
@@ -127,6 +138,25 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 	}
 	if _, err := backend.EnsureVersion(ctx, d.cfg.VersionFloor); err != nil {
 		return nil, toGRPCError(err)
+	}
+	if sourceSnap != nil {
+		if err := backend.EnsureSnapshotFeature(ctx); err != nil {
+			return nil, toGRPCError(err)
+		}
+		live, err := backend.GetSnapshot(ctx, sourceSnap.SnapshotID)
+		if err != nil {
+			return nil, toGRPCError(err)
+		}
+		if live == nil || live.IDString() != sourceSnap.SnapshotID || live.SourceFileID != sourceSnap.SourceDirectory {
+			return nil, status.Error(codes.FailedPrecondition, "snapshot identity does not match the live Qumulo snapshot")
+		}
+		attrs, err := backend.FileAttributes(ctx, sourceSnap.SourceFSPath)
+		if err != nil {
+			return nil, toGRPCError(err)
+		}
+		if attrs == nil || attrs.ID != sourceSnap.SourceDirectory {
+			return nil, status.Error(codes.FailedPrecondition, "snapshot source directory identity changed")
+		}
 	}
 	if err := backend.CheckVolume(ctx, opts); err != nil {
 		return nil, toGRPCError(err)
@@ -204,15 +234,45 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 	if err := backend.ValidateVolume(ctx, handle); err != nil {
 		return nil, toGRPCError(err)
 	}
+	if sourceSnap != nil {
+		if err := backend.CopySnapshotTree(ctx, sourceSnap.SourceFSPath, sourceSnap.SourceDirectory, sourceSnap.SnapshotID, opts.FSPath); err != nil {
+			d.cleanupFailedRestore(ctx, backend, handle)
+			return nil, toGRPCError(err)
+		}
+		if err := backend.ValidateVolume(ctx, handle); err != nil {
+			d.cleanupFailedRestore(ctx, backend, handle)
+			return nil, toGRPCError(err)
+		}
+	}
 	volumeID, err := handle.encode(d.cfg.HandleKey)
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
-	return &csi.CreateVolumeResponse{Volume: &csi.Volume{
+	vol := &csi.Volume{
 		VolumeId:      volumeID,
 		CapacityBytes: capacity,
 		VolumeContext: volumeContextForHandle(handle),
-	}}, nil
+	}
+	if sourceSnap != nil {
+		vol.ContentSource = &csi.VolumeContentSource{Type: &csi.VolumeContentSource_Snapshot{
+			Snapshot: &csi.VolumeContentSource_SnapshotSource{SnapshotId: req.GetVolumeContentSource().GetSnapshot().GetSnapshotId()},
+		}}
+	}
+	return &csi.CreateVolumeResponse{Volume: vol}, nil
+}
+
+func (d *Driver) cleanupFailedRestore(ctx context.Context, backend storageBackend, handle volumeHandle) {
+	if err := backend.PrepareVolumeDeletion(ctx, handle); err != nil {
+		d.log.Warn("restore cleanup could not claim deletion", "path", handle.FSPath, "err", err)
+		_ = backend.DeleteVolumeResource(ctx, handle, false)
+		return
+	}
+	if err := backend.TreeDelete(ctx, handle.DirectoryID); err != nil {
+		d.log.Warn("restore cleanup tree-delete failed", "path", handle.FSPath, "err", err)
+	}
+	if err := backend.DeleteVolumeResource(ctx, handle, true); err != nil {
+		d.log.Warn("restore cleanup resource delete failed", "path", handle.FSPath, "err", err)
+	}
 }
 
 func (d *Driver) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest) (*csi.DeleteVolumeResponse, error) {
@@ -262,6 +322,13 @@ func (d *Driver) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest)
 	}
 	if attrs.ID != h.DirectoryID {
 		return nil, status.Error(codes.FailedPrecondition, "volume path now refers to a different filesystem object; refusing data deletion")
+	}
+	hasSnaps, err := backend.HasDriverSnapshots(ctx, h.DirectoryID)
+	if err != nil {
+		return nil, toGRPCError(err)
+	}
+	if hasSnaps {
+		return nil, toGRPCError(fmt.Errorf("%w", errSnapshotsPresent))
 	}
 	if err := backend.PrepareVolumeDeletion(ctx, h); err != nil {
 		return nil, toGRPCError(err)
@@ -317,6 +384,7 @@ func (d *Driver) ControllerGetCapabilities(context.Context, *csi.ControllerGetCa
 	return &csi.ControllerGetCapabilitiesResponse{Capabilities: []*csi.ControllerServiceCapability{
 		controllerCapability(csi.ControllerServiceCapability_RPC_CREATE_DELETE_VOLUME),
 		controllerCapability(csi.ControllerServiceCapability_RPC_EXPAND_VOLUME),
+		controllerCapability(csi.ControllerServiceCapability_RPC_CREATE_DELETE_SNAPSHOT),
 	}}, nil
 }
 
@@ -361,6 +429,104 @@ func (d *Driver) ControllerExpandVolume(ctx context.Context, req *csi.Controller
 		return nil, status.Errorf(codes.OutOfRange, "current volume capacity %d exceeds requested limit %d", capacity, limit)
 	}
 	return &csi.ControllerExpandVolumeResponse{CapacityBytes: capacity, NodeExpansionRequired: false}, nil
+}
+
+func (d *Driver) CreateSnapshot(ctx context.Context, req *csi.CreateSnapshotRequest) (*csi.CreateSnapshotResponse, error) {
+	if !d.controllerEnabled() {
+		return nil, status.Error(codes.Unimplemented, "controller service is disabled")
+	}
+	if strings.TrimSpace(req.GetName()) == "" {
+		return nil, status.Error(codes.InvalidArgument, "snapshot name is required")
+	}
+	if strings.TrimSpace(req.GetSourceVolumeId()) == "" {
+		return nil, status.Error(codes.InvalidArgument, "source volume ID is required")
+	}
+	unlock := d.lockCreateName("snapshot\x00" + req.GetName())
+	defer unlock()
+	h, err := decodeVolumeHandle(req.GetSourceVolumeId(), d.cfg)
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	backend, err := d.connector.Connect(ctx, h.Endpoint, h.RESTPort, req.GetSecrets())
+	if err != nil {
+		return nil, toGRPCError(err)
+	}
+	if err := backend.EnsureSnapshotFeature(ctx); err != nil {
+		return nil, toGRPCError(err)
+	}
+	if err := backend.ValidateVolume(ctx, h); err != nil {
+		return nil, toGRPCError(err)
+	}
+	suffix := snapshotNameSuffix(req.GetName())
+	snap, err := backend.FindSnapshot(ctx, h.DirectoryID, suffix)
+	if err != nil {
+		return nil, toGRPCError(err)
+	}
+	if snap == nil {
+		snap, err = backend.CreateSnapshot(ctx, h.DirectoryID, suffix)
+		if err != nil {
+			existing, findErr := backend.FindSnapshot(ctx, h.DirectoryID, suffix)
+			if findErr == nil && existing != nil {
+				snap = existing
+			} else {
+				return nil, toGRPCError(err)
+			}
+		}
+	}
+	if snap.SourceFileID != h.DirectoryID {
+		return nil, status.Error(codes.FailedPrecondition, "snapshot source directory does not match the volume")
+	}
+	encoded, err := snapshotHandle{
+		Endpoint:        h.Endpoint,
+		RESTPort:        h.RESTPort,
+		SnapshotID:      snap.IDString(),
+		SourceDirectory: h.DirectoryID,
+		SourceFSPath:    h.FSPath,
+		NameSuffix:      suffix,
+	}.encode(d.cfg.HandleKey)
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	return &csi.CreateSnapshotResponse{Snapshot: snapshotCSI(encoded, req.GetSourceVolumeId(), snap)}, nil
+}
+
+func (d *Driver) DeleteSnapshot(ctx context.Context, req *csi.DeleteSnapshotRequest) (*csi.DeleteSnapshotResponse, error) {
+	if !d.controllerEnabled() {
+		return nil, status.Error(codes.Unimplemented, "controller service is disabled")
+	}
+	if strings.TrimSpace(req.GetSnapshotId()) == "" {
+		return nil, status.Error(codes.InvalidArgument, "snapshot ID is required")
+	}
+	h, err := decodeSnapshotHandle(req.GetSnapshotId(), d.cfg)
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	backend, err := d.connector.Connect(ctx, h.Endpoint, h.RESTPort, req.GetSecrets())
+	if err != nil {
+		return nil, toGRPCError(err)
+	}
+	if err := backend.DeleteSnapshot(ctx, h.SnapshotID); err != nil {
+		return nil, toGRPCError(err)
+	}
+	return &csi.DeleteSnapshotResponse{}, nil
+}
+
+func snapshotCSI(id, sourceVolumeID string, snap *qumulo.Snapshot) *csi.Snapshot {
+	out := &csi.Snapshot{
+		SnapshotId:     id,
+		SourceVolumeId: sourceVolumeID,
+		ReadyToUse:     true,
+		SizeBytes:      0,
+	}
+	if snap != nil && snap.Timestamp != "" {
+		if ts, err := time.Parse(time.RFC3339, snap.Timestamp); err == nil {
+			out.CreationTime = timestamppb.New(ts)
+		}
+	}
+	if out.CreationTime == nil {
+		out.CreationTime = timestamppb.Now()
+	}
+	return out
 }
 
 func volumeContextForHandle(h volumeHandle) map[string]string {
@@ -518,7 +684,10 @@ func toGRPCError(err error) error {
 	if errors.Is(err, errVolumeNotFound) {
 		return status.Error(codes.NotFound, err.Error())
 	}
-	if errors.Is(err, errVolumeIdentityChanged) || errors.Is(err, errVolumeResourceMissing) {
+	if errors.Is(err, errVolumeIdentityChanged) || errors.Is(err, errVolumeResourceMissing) || errors.Is(err, errSnapshotsPresent) {
+		return status.Error(codes.FailedPrecondition, err.Error())
+	}
+	if errors.Is(err, errSnapshotsUnsupported) {
 		return status.Error(codes.FailedPrecondition, err.Error())
 	}
 	if api, ok := qumulo.AsAPIError(err); ok {
