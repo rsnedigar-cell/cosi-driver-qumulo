@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -35,16 +36,133 @@ func encodeFSPath(p string) string {
 }
 
 func filePath(fsPath, suffix string) string {
-	return "/v1/files/" + encodeFSPath(fsPath) + suffix
+	return "/v1/files/" + fileRef(fsPath) + suffix
+}
+
+// fileRef encodes a filesystem path (`/k8s/...`) or a raw numeric file id.
+func fileRef(ref string) string {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return encodeFSPath("/")
+	}
+	if strings.HasPrefix(ref, "/") {
+		return encodeFSPath(ref)
+	}
+	return url.PathEscape(ref)
 }
 
 func (c *Connection) FileAttributes(ctx context.Context, fsPath string) (*FileAttributes, error) {
+	return c.fileAttributes(ctx, fsPath, "")
+}
+
+func (c *Connection) fileAttributes(ctx context.Context, ref, snapshotID string) (*FileAttributes, error) {
 	var out FileAttributes
-	_, err := c.DoJSON(ctx, http.MethodGet, filePath(fsPath, "/info/attributes"), nil, nil, nil, &out)
+	query := url.Values{}
+	if snapshotID != "" {
+		query.Set("snapshot", snapshotID)
+	}
+	var q url.Values
+	if len(query) > 0 {
+		q = query
+	}
+	_, err := c.DoJSON(ctx, http.MethodGet, filePath(ref, "/info/attributes"), q, nil, nil, &out)
 	if err != nil {
 		return nil, err
 	}
 	return &out, nil
+}
+
+const (
+	FileTypeFile      = "FS_FILE_TYPE_FILE"
+	FileTypeDirectory = "FS_FILE_TYPE_DIRECTORY"
+	FileTypeSymlink   = "FS_FILE_TYPE_SYMLINK"
+)
+
+// DirectoryEntry is one child of GET /v1/files/{ref}/entries/.
+type DirectoryEntry struct {
+	Path   string `json:"path"`
+	Name   string `json:"name"`
+	Type   string `json:"type"`
+	ID     string `json:"id"`
+	Mode   string `json:"mode"`
+	Size   string `json:"size"`
+	Target string `json:"symlink_target,omitempty"`
+}
+
+type directoryEntriesResponse struct {
+	Path   string           `json:"path"`
+	ID     string           `json:"id"`
+	Files  []DirectoryEntry `json:"files"`
+	Paging pageMetadata     `json:"paging"`
+}
+
+// ListDirectoryEntries lists children of a directory, optionally at a snapshot.
+// Pending live lock: paging is modeled with paging.next like other collections.
+func (c *Connection) ListDirectoryEntries(ctx context.Context, ref, snapshotID string) ([]DirectoryEntry, error) {
+	var out []DirectoryEntry
+	query := url.Values{}
+	if snapshotID != "" {
+		query.Set("snapshot", snapshotID)
+	}
+	seen := map[string]struct{}{}
+	for {
+		var page directoryEntriesResponse
+		q := url.Values{}
+		for k, vs := range query {
+			q[k] = vs
+		}
+		_, err := c.DoJSON(ctx, http.MethodGet, filePath(ref, "/entries/"), q, nil, nil, &page)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, page.Files...)
+		after, hasNext, err := nextPageAfter(page.Paging.Next, seen)
+		if err != nil {
+			return nil, err
+		}
+		if !hasNext {
+			return out, nil
+		}
+		query.Set("after", after)
+	}
+}
+
+type copyChunkRequest struct {
+	SourceID       string `json:"source_id,omitempty"`
+	SourcePath     string `json:"source_path,omitempty"`
+	SourceSnapshot qint   `json:"source_snapshot,omitempty"`
+	SourceOffset   string `json:"source_offset,omitempty"`
+	TargetOffset   string `json:"target_offset,omitempty"`
+	Length         string `json:"length,omitempty"`
+}
+
+// CopyFileFromSnapshot copies one file's contents from a snapshot into an
+// already-created destination file using POST /v1/files/{ref}/copy-chunk.
+func (c *Connection) CopyFileFromSnapshot(ctx context.Context, destRef, sourcePath, snapshotID string) error {
+	if strings.TrimSpace(destRef) == "" || strings.TrimSpace(sourcePath) == "" {
+		return fmt.Errorf("copy source and destination are required")
+	}
+	snapNum, err := strconv.Atoi(snapshotID)
+	if err != nil || snapNum <= 0 {
+		return fmt.Errorf("invalid snapshot id %q", snapshotID)
+	}
+	req := copyChunkRequest{SourceSnapshot: qint(snapNum)}
+	if strings.HasPrefix(sourcePath, "/") {
+		req.SourcePath = sourcePath
+	} else {
+		req.SourceID = sourcePath
+	}
+	for {
+		var out copyChunkRequest
+		_, err := c.DoJSON(ctx, http.MethodPost, filePath(destRef, "/copy-chunk"), nil, nil, req, &out)
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(out.Length) == "" || out.Length == "0" {
+			return nil
+		}
+		req = out
+	}
 }
 
 // PatchFileMode sets the POSIX mode (e.g. "0777") on a directory.

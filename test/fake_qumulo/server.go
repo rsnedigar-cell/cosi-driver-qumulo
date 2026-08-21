@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -53,6 +54,22 @@ type Server struct {
 	FailACLPut      bool         // inject a 400 on PUT /info/acl
 	FailPolicyPut   bool         // inject a 400 on bucket policy PUT
 	RejectPrivate   bool         // legacy Core: reject create with "private" field
+
+	FileTypes     map[string]string
+	FileBodies    map[string][]byte
+	Snapshots     []qumulo.Snapshot
+	SnapshotTrees map[int]map[string]fakeNode
+	FailCopy      bool
+	snapshotSeq   atomic.Int64
+}
+
+type fakeNode struct {
+	ID   string
+	Path string
+	Name string
+	Type string
+	Mode string
+	Body []byte
 }
 
 type bucketState struct {
@@ -91,8 +108,11 @@ func New() *Server {
 		Users:          map[string]*userState{},
 		Quota:          map[string]int64{},
 		Files:          map[string]string{},
-		ACLs:           map[string]*qumulo.ACL{},
+		FileTypes:      map[string]string{},
+		FileBodies:     map[string][]byte{},
 		Modes:          map[string]string{},
+		ACLs:           map[string]*qumulo.ACL{},
+		SnapshotTrees:  map[int]map[string]fakeNode{},
 		treeDeleteJobs: map[string]*treeDeleteState{},
 	}
 	mux := http.NewServeMux()
@@ -108,6 +128,7 @@ func New() *Server {
 	mux.HandleFunc("/v1/files/quotas/", s.quotas)
 	mux.HandleFunc("/v1/tree-delete/jobs/", s.treeDelete)
 	mux.HandleFunc("/v1/files/", s.files)
+	mux.HandleFunc("/v3/snapshots/", s.snapshots)
 	s.Server = httptest.NewTLSServer(http.HandlerFunc(s.wrap(mux)))
 	return s
 }
@@ -446,7 +467,7 @@ func (s *Server) groups(w http.ResponseWriter, r *http.Request) {
 
 func parseFileRef(r *http.Request) (path, suffix string) {
 	rest := strings.TrimPrefix(r.URL.Path, "/v1/files/")
-	for _, suf := range []string{"/info/attributes", "/info/acl", "/entries/", "/entries"} {
+	for _, suf := range []string{"/info/attributes", "/info/acl", "/copy-chunk", "/entries/", "/entries"} {
 		if i := strings.Index(rest, suf); i >= 0 {
 			raw := rest[:i]
 			if dec, err := url.PathUnescape(raw); err == nil {
@@ -466,20 +487,47 @@ func (s *Server) lookupFile(p string) (string, bool) {
 		if strings.Trim(path, "/") == strings.Trim(p, "/") {
 			return fid, true
 		}
+		if fid == strings.Trim(p, "/") || fid == p {
+			return fid, true
+		}
 	}
 	return "", false
+}
+
+func (s *Server) pathForID(id string) string {
+	for p, fid := range s.Files {
+		if fid == id {
+			return p
+		}
+	}
+	return ""
 }
 
 func (s *Server) files(w http.ResponseWriter, r *http.Request) {
 	p, suffix := parseFileRef(r)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if resolved := s.pathForID(strings.Trim(p, "/")); resolved != "" {
+		p = resolved
+	} else if resolved := s.pathForID(p); resolved != "" {
+		p = resolved
+	}
 	id, ok := s.lookupFile(p)
+	if !ok && suffix != "/entries/" && suffix != "/copy-chunk" {
+		writeErr(w, 404, qumulo.ErrClassFSNoSuchEntry, "no file")
+		return
+	}
 	if !ok {
 		writeErr(w, 404, qumulo.ErrClassFSNoSuchEntry, "no file")
 		return
 	}
 	switch suffix {
+	case "/entries/", "/entries":
+		s.fileEntries(w, r, p, id)
+		return
+	case "/copy-chunk":
+		s.copyChunk(w, r, p)
+		return
 	case "/info/attributes":
 		switch r.Method {
 		case http.MethodGet:
@@ -546,6 +594,235 @@ func (s *Server) files(w http.ResponseWriter, r *http.Request) {
 		}
 	default:
 		writeJSON(w, 200, qumulo.FileAttributes{ID: id, Path: p})
+	}
+}
+
+func (s *Server) fileEntries(w http.ResponseWriter, r *http.Request, parent, parentID string) {
+	switch r.Method {
+	case http.MethodGet:
+		snap := r.URL.Query().Get("snapshot")
+		nodes := s.liveNodes()
+		if snap != "" {
+			id, err := strconv.Atoi(snap)
+			if err != nil {
+				writeErr(w, 400, qumulo.ErrClassRESTInvalidRequest, "invalid snapshot")
+				return
+			}
+			tree, ok := s.SnapshotTrees[id]
+			if !ok {
+				writeErr(w, 404, qumulo.ErrClassRESTNotFound, "snapshot missing")
+				return
+			}
+			nodes = tree
+		}
+		var files []qumulo.DirectoryEntry
+		for p, node := range nodes {
+			if pathParent(p) != parent {
+				continue
+			}
+			files = append(files, qumulo.DirectoryEntry{
+				Path: node.Path, Name: node.Name, Type: node.Type, ID: node.ID, Mode: node.Mode,
+			})
+		}
+		writeJSON(w, 200, map[string]any{"path": parent, "id": parentID, "files": files})
+	case http.MethodPost:
+		var in struct {
+			Name   string `json:"name"`
+			Action string `json:"action"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&in)
+		if in.Name == "" {
+			writeErr(w, 400, qumulo.ErrClassRESTInvalidRequest, "name required")
+			return
+		}
+		child := parent
+		if parent == "/" {
+			child = "/" + in.Name
+		} else {
+			child = strings.TrimRight(parent, "/") + "/" + in.Name
+		}
+		if _, exists := s.Files[child]; exists {
+			writeErr(w, 409, qumulo.ErrClassFSEntryExists, "exists")
+			return
+		}
+		id := "fid-" + in.Name + "-" + strconv.Itoa(len(s.Files)+1)
+		typ := qumulo.FileTypeDirectory
+		if in.Action == "CREATE_FILE" {
+			typ = qumulo.FileTypeFile
+			s.FileBodies[child] = []byte{}
+		}
+		s.Files[child] = id
+		s.FileTypes[child] = typ
+		s.Modes[child] = "0755"
+		writeJSON(w, 200, qumulo.FileAttributes{ID: id, Path: child, Name: in.Name, Mode: "0755", Type: typ})
+	default:
+		w.WriteHeader(405)
+	}
+}
+
+func (s *Server) copyChunk(w http.ResponseWriter, r *http.Request, dest string) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(405)
+		return
+	}
+	if s.FailCopy {
+		writeErr(w, 500, "internal_error", "injected copy failure")
+		return
+	}
+	var in struct {
+		SourceID       string `json:"source_id"`
+		SourcePath     string `json:"source_path"`
+		SourceSnapshot int    `json:"source_snapshot"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&in)
+	srcPath := in.SourcePath
+	if srcPath == "" {
+		srcPath = s.pathForID(in.SourceID)
+	}
+	var body []byte
+	if in.SourceSnapshot != 0 {
+		tree := s.SnapshotTrees[in.SourceSnapshot]
+		node, ok := tree[srcPath]
+		if !ok {
+			writeErr(w, 404, qumulo.ErrClassFSNoSuchEntry, "snapshot source missing")
+			return
+		}
+		body = node.Body
+	} else {
+		body = s.FileBodies[srcPath]
+	}
+	s.FileBodies[dest] = append([]byte(nil), body...)
+	writeJSON(w, 200, map[string]any{})
+}
+
+func (s *Server) liveNodes() map[string]fakeNode {
+	out := map[string]fakeNode{}
+	for p, id := range s.Files {
+		name := p
+		if i := strings.LastIndex(p, "/"); i >= 0 {
+			name = p[i+1:]
+			if name == "" {
+				name = "/"
+			}
+		}
+		typ := s.FileTypes[p]
+		if typ == "" {
+			typ = qumulo.FileTypeDirectory
+		}
+		out[p] = fakeNode{ID: id, Path: p, Name: name, Type: typ, Mode: s.Modes[p], Body: s.FileBodies[p]}
+	}
+	return out
+}
+
+func pathParent(p string) string {
+	p = strings.TrimRight(p, "/")
+	i := strings.LastIndex(p, "/")
+	if i <= 0 {
+		return "/"
+	}
+	return p[:i]
+}
+
+func (s *Server) snapshots(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rest := strings.TrimPrefix(r.URL.Path, "/v3/snapshots/")
+	switch {
+	case rest == "" && r.Method == http.MethodGet:
+		if r.URL.Query().Get("filter") == "" {
+			writeErr(w, 400, qumulo.ErrClassRESTInvalidRequest, "filter is required")
+			return
+		}
+		writeJSON(w, 200, map[string]any{"entries": s.Snapshots, "paging": map[string]any{"next": nil}})
+	case rest == "" && r.Method == http.MethodPost:
+		var in struct {
+			NameSuffix   string `json:"name_suffix"`
+			SourceFileID string `json:"source_file_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.SourceFileID == "" || in.NameSuffix == "" {
+			writeErr(w, 400, qumulo.ErrClassRESTInvalidRequest, "invalid snapshot create")
+			return
+		}
+		id := int(s.snapshotSeq.Add(1))
+		srcPath := s.pathForID(in.SourceFileID)
+		if srcPath == "" {
+			writeErr(w, 404, qumulo.ErrClassFSNoSuchEntry, "source directory not found")
+			return
+		}
+		var snap qumulo.Snapshot
+		_ = json.Unmarshal([]byte(fmt.Sprintf(
+			`{"id":%d,"name":%q,"timestamp":"2026-08-17T00:00:00Z","source_file_id":%q}`,
+			id, strconv.Itoa(id)+"_"+in.NameSuffix, in.SourceFileID,
+		)), &snap)
+		s.Snapshots = append(s.Snapshots, snap)
+		s.SnapshotTrees[id] = s.cloneSubtree(srcPath)
+		writeJSON(w, 200, snap)
+	case rest != "" && r.Method == http.MethodGet:
+		id, err := strconv.Atoi(strings.Trim(rest, "/"))
+		if err != nil {
+			writeErr(w, 400, qumulo.ErrClassRESTInvalidRequest, "invalid id")
+			return
+		}
+		for _, snap := range s.Snapshots {
+			if snap.IDString() == strconv.Itoa(id) {
+				writeJSON(w, 200, snap)
+				return
+			}
+		}
+		writeErr(w, 404, qumulo.ErrClassRESTNotFound, "snapshot not found")
+	case rest != "" && r.Method == http.MethodDelete:
+		id, err := strconv.Atoi(strings.Trim(rest, "/"))
+		if err != nil {
+			writeErr(w, 400, qumulo.ErrClassRESTInvalidRequest, "invalid id")
+			return
+		}
+		kept := s.Snapshots[:0]
+		found := false
+		for _, snap := range s.Snapshots {
+			if snap.IDString() == strconv.Itoa(id) {
+				found = true
+				continue
+			}
+			kept = append(kept, snap)
+		}
+		s.Snapshots = kept
+		delete(s.SnapshotTrees, id)
+		if !found {
+			writeErr(w, 404, qumulo.ErrClassRESTNotFound, "snapshot not found")
+			return
+		}
+		w.WriteHeader(202)
+	default:
+		w.WriteHeader(405)
+	}
+}
+
+func (s *Server) cloneSubtree(root string) map[string]fakeNode {
+	out := map[string]fakeNode{}
+	for p, node := range s.liveNodes() {
+		if p == root || strings.HasPrefix(p, strings.TrimRight(root, "/")+"/") {
+			cp := node
+			if node.Body != nil {
+				cp.Body = append([]byte(nil), node.Body...)
+			}
+			out[p] = cp
+		}
+	}
+	return out
+}
+
+func (s *Server) SeedFile(path, typ string, body []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.Files[path] == "" {
+		s.Files[path] = "fid-" + strings.Trim(path, "/")
+	}
+	s.FileTypes[path] = typ
+	if typ == qumulo.FileTypeFile {
+		s.FileBodies[path] = append([]byte(nil), body...)
+	}
+	if s.Modes[path] == "" {
+		s.Modes[path] = "0644"
 	}
 }
 

@@ -36,6 +36,28 @@ func (c *Connection) CreateDirectory(ctx context.Context, parent, name string) (
 	return &out, nil
 }
 
+// CreateFile creates an empty file under parent.
+func (c *Connection) CreateFile(ctx context.Context, parent, name string) (*FileAttributes, error) {
+	if err := validateDirectoryName(name); err != nil {
+		return nil, err
+	}
+	var out FileAttributes
+	_, err := c.DoJSON(ctx, http.MethodPost, filePath(parent, "/entries/"), nil, nil, createDirectoryRequest{
+		Name:   name,
+		Action: "CREATE_FILE",
+	}, &out)
+	if err != nil {
+		return nil, err
+	}
+	if out.Path == "" {
+		out.Path = joinFSPath(parent, name)
+	}
+	if out.Name == "" {
+		out.Name = name
+	}
+	return &out, nil
+}
+
 // EnsureDirectory creates every missing component of an absolute filesystem
 // path. It reconciles an ambiguous create by reading the component again, so
 // callers can safely retry even though the underlying create API is a POST.

@@ -20,6 +20,7 @@ const (
 	FeatureBucketPolicy  = "bucket-policy"
 	FeatureQuota         = "quota"
 	FeatureTreeDelete    = "tree-delete"
+	FeatureSnapshots     = "directory-snapshots"
 )
 
 // FeatureMinima is the introducing Core version per feature. Kept as a
@@ -32,6 +33,9 @@ var FeatureMinima = map[string]string{
 	FeatureBucketPolicy:  "7.1.0",
 	FeatureQuota:         "5.3.3",
 	FeatureTreeDelete:    "5.3.3",
+	// Directory snapshots predate the driver's 7.2 floor. The v3 REST
+	// surface is pending a live lock against Core 7.9.2.2.
+	FeatureSnapshots: "5.3.3",
 }
 
 var coreVersionRE = regexp.MustCompile(`(?i)Qumulo Core\s+([0-9]+(?:\.[0-9]+){1,3})`)
